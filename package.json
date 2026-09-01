@@ -1,0 +1,46 @@
+{
+  "name": "diffquiz",
+  "version": "0.1.0",
+  "description": "A 60-second quiz on your own diff before you open the PR. Non-blocking, human-focused, runs on the LLM CLI you already use.",
+  "keywords": [
+    "pull-request",
+    "code-review",
+    "git",
+    "diff",
+    "quiz",
+    "human-in-the-loop",
+    "cli"
+  ],
+  "license": "MIT",
+  "author": "TYLDA Solutions GmbH <hello@tylda.solutions>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TYLDA-Solutions/diffquiz.git"
+  },
+  "type": "module",
+  "bin": {
+    "diffquiz": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.2"
+  }
+}
