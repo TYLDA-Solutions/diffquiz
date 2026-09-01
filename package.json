@@ -36,7 +36,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/",
+    "test": "node --test \"test/*.test.ts\"",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {

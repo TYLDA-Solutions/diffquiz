@@ -1,0 +1,14 @@
+{
+  "name": "diffquiz",
+  "owner": {
+    "name": "TYLDA Solutions GmbH",
+    "email": "hello@tylda.solutions"
+  },
+  "plugins": [
+    {
+      "name": "diffquiz",
+      "source": "./plugin/diffquiz",
+      "description": "Quiz yourself on your own diff before you open the PR. 3-5 questions, answered inline in the session, non-blocking."
+    }
+  ]
+}
