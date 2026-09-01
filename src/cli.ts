@@ -221,7 +221,17 @@ async function runPlay(opts: CliOptions, cwd: string): Promise<void> {
     return;
   }
 
-  const result = await playQuiz(quiz, { input: process.stdin, output: process.stdout });
+  let result;
+  try {
+    result = await playQuiz(quiz, { input: process.stdin, output: process.stdout });
+  } catch (err) {
+    // Ctrl+C/Ctrl+D mid-quiz is a legitimate way out of a non-blocking tool.
+    if (err instanceof Error && (err.name === "AbortError" || ("code" in err && err.code === "ABORT_ERR"))) {
+      process.stderr.write("\nQuiz aborted — nothing recorded.\n");
+      return;
+    }
+    throw err;
+  }
   process.stdout.write(renderTerminal(quiz, result, meta(diff, provider, opts)));
 
   if (opts.json) {
