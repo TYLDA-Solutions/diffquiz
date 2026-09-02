@@ -176,6 +176,11 @@ completed quiz a marker is written
 valid 60 minutes) so a retried push isn't quizzed twice; new commits
 invalidate it and re-trigger the quiz.
 
+Modes are the Claude Code integration; the `diffquiz` CLI itself is
+harness-agnostic and works in any terminal with any supported LLM backend.
+A universal, harness-independent auto mode — an opt-in git `pre-push` hook
+that quizzes on any push from any tool — is on the [roadmap](#roadmap).
+
 ## Configuration
 
 Precedence (highest wins): **CLI flags > environment variables > repo
@@ -319,6 +324,10 @@ questions this raises.
 
 - GitHub Action that posts the quiz result as a non-blocking PR comment
   (follow-up; not part of the CLI today).
+- `diffquiz install-hook`: an opt-in git `pre-push` hook as a
+  harness-independent auto mode — quizzes via the terminal on any push,
+  regardless of which AI tool (or none) is driving; always exits 0,
+  fail-open, same 60-minute quiz marker.
 
 ## License
 
