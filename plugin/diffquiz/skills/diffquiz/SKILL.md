@@ -1,6 +1,6 @@
 ---
 name: diffquiz
-description: Quiz the user on their own diff before they open a PR. Use when the user asks to be quizzed on their diff or changes, wants to check their own understanding before opening a PR, says something like "quiz me on my diff", "check my understanding before PR", or mentions diffquiz.
+description: Quiz the user on their own diff before they open a PR. Use when the user asks to be quizzed on their diff or changes, wants to check their own understanding before opening a PR, says something like "quiz me on my diff", "check my understanding before PR", "diffquiz auto mode", or mentions diffquiz — including when a pre-push hook has deferred a `git push` or `gh pr create` pending this quiz.
 argument-hint: "[base-ref]"
 disable-model-invocation: false
 ---
@@ -82,6 +82,64 @@ question (topic + correct/incorrect). Then offer — do not just do it — to
 save a markdown report the user can paste into their PR description. Only
 write that file if the user says yes, and never post or send it anywhere
 without being explicitly asked.
+
+### 5. Write the quiz marker
+
+A completed quiz — any score — writes a marker so the pre-push hook doesn't
+re-trigger the quiz for the same commit within the next hour. Do this after
+every completed quiz, regardless of mode:
+
+- Cache dir: `$DIFFQUIZ_CACHE_DIR` if set, else `$XDG_CACHE_HOME/diffquiz` if
+  `$XDG_CACHE_HOME` is set, else `~/.cache/diffquiz`. Create it if missing.
+- File: `quizzed-<first 16 hex chars of sha256(absolute repo root path)>`.
+- Content: `{"head": "<current HEAD sha>", "at": "<ISO timestamp now>"}`.
+
+One reliable way to do this in a single step:
+
+```bash
+node -e '
+const { execSync } = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const root = execSync("git rev-parse --show-toplevel").toString().trim();
+const head = execSync("git rev-parse HEAD").toString().trim();
+const hash = crypto.createHash("sha256").update(root).digest("hex").slice(0, 16);
+const cacheDir = process.env.DIFFQUIZ_CACHE_DIR
+  || (process.env.XDG_CACHE_HOME
+    ? path.join(process.env.XDG_CACHE_HOME, "diffquiz")
+    : path.join(os.homedir(), ".cache", "diffquiz"));
+fs.mkdirSync(cacheDir, { recursive: true });
+fs.writeFileSync(
+  path.join(cacheDir, `quizzed-${hash}`),
+  JSON.stringify({ head, at: new Date().toISOString() }, null, 2) + "\n",
+);
+'
+```
+
+### 6. Offer auto mode once
+
+After writing the marker, check the user-global config (same path chain as
+`/diffquiz:auto`: `$DIFFQUIZ_CONFIG`, else `$XDG_CONFIG_HOME/diffquiz/config.json`,
+else `~/.config/diffquiz/config.json`). If it has no `mode` key at all, offer
+— in one sentence — that `/diffquiz:auto` makes this automatic before every
+push/PR. If `mode` is already set (either value), say nothing about it; don't
+nag on every quiz.
+
+## Auto mode
+
+When this skill runs because a `pre-push-quiz.mjs` hook deferred a `git push`
+or `gh pr create`, run the quiz exactly as above with the author, write the
+marker (step 5), then re-run the user's original command — no extra ceremony,
+no re-explaining what just happened.
+
+If there is no human available to answer questions (e.g. a fully autonomous
+run with nobody at the keyboard), do not fake or guess answers on the user's
+behalf. Instead, tell the user that auto mode needs a human present and
+suggest `/diffquiz:ondemand` for unattended workflows. Do not write a marker
+in this case — an unanswered quiz never counts as completed.
 
 ## Outside a Claude Code session
 

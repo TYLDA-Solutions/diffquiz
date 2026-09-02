@@ -167,6 +167,13 @@ export interface DiffQuizConfig {
    * the completion is read from stdout. Example: ["llm", "-m", "gpt-5"].
    */
   customCommand?: string[];
+  /**
+   * Claude Code plugin workflow mode: "auto" quizzes before each push/PR in
+   * a session, "ondemand" (default) only when asked. User-global config
+   * only — a repo .diffquiz.json cannot set it. The CLI ignores it except
+   * for display in `diffquiz doctor`.
+   */
+  mode?: "auto" | "ondemand";
 }
 
 // ---------------------------------------------------------------------------

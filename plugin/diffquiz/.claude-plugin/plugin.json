@@ -1,7 +1,7 @@
 {
   "name": "diffquiz",
   "description": "A 60-second quiz on your own diff before you open the PR. Claude generates 3-5 multiple-choice questions about what your change actually does, quizzes you one question at a time, and explains every answer immediately. Non-blocking - it measures understanding, not correctness.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "TYLDA Solutions GmbH"
   },

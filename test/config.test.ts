@@ -418,3 +418,54 @@ for (const { name, value } of invalidCustomCommandEnvCases) {
     });
   });
 }
+
+test('mode: honored from the global config, silently ignored from the repo file', async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ mode: "auto" }));
+
+    const globalDir = mkdtempSync(join(tmpdir(), "diffquiz-global-"));
+    t.after(() => rmSync(globalDir, { recursive: true, force: true }));
+    const globalPath = join(globalDir, "config.json");
+    writeFileSync(globalPath, JSON.stringify({ mode: "ondemand" }));
+    process.env.DIFFQUIZ_CONFIG = globalPath;
+
+    const stderr = await withCapturedStderr(async () => {
+      const config = await loadConfig(root);
+      // Repo "auto" must not shadow the user's own "ondemand".
+      assert.equal(config.mode, "ondemand");
+    });
+    assert.equal(stderr, ""); // silent drop — mode is noise, not a code path
+  });
+});
+
+test('mode: repo file with an invalid mode value still loads (dropped before validation)', async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ mode: "yolo", language: "de" }));
+
+    const config = await loadConfig(root);
+    assert.equal(config.mode, undefined);
+    assert.equal(config.language, "de");
+  });
+});
+
+test('mode: invalid value in the GLOBAL config throws BAD_CONFIG', async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+
+    const globalDir = mkdtempSync(join(tmpdir(), "diffquiz-global-"));
+    t.after(() => rmSync(globalDir, { recursive: true, force: true }));
+    const globalPath = join(globalDir, "config.json");
+    writeFileSync(globalPath, JSON.stringify({ mode: "yolo" }));
+    process.env.DIFFQUIZ_CONFIG = globalPath;
+
+    await assert.rejects(
+      () => loadConfig(root),
+      (err: unknown) => err instanceof DiffQuizError && err.code === "BAD_CONFIG",
+    );
+  });
+});

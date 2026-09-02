@@ -28,6 +28,19 @@ Optionally pass a base ref: `/diffquiz:diffquiz main`. Claude will also
 trigger the skill on its own for requests like "quiz me on my diff" or
 "check my understanding before I open this PR".
 
+## Modes
+
+- **`ondemand`** (default) — quiz only when you ask for it.
+- **`auto`** — a PreToolUse hook defers `git push`/`gh pr create` inside
+  Claude Code sessions until you've been quizzed on the current diff, then
+  the command proceeds; wrong answers never block it. A plain-terminal
+  `git push` outside a Claude Code session is not intercepted.
+
+Switch with `/diffquiz:auto`, `/diffquiz:ondemand`, `/diffquiz:status`. Mode
+lives only in your user-global config, never in a repo's `.diffquiz.json`.
+See [SECURITY.md](../../SECURITY.md#the-auto-mode-hook) for the hook's
+fail-open guarantee and quiz-marker mechanics.
+
 ## What it does
 
 1. Computes your diff against the merge-base with the default branch (or the

@@ -312,6 +312,7 @@ async function runDoctor(cwd: string): Promise<void> {
   } catch (err) {
     lines.push(`config: ${color.red(err instanceof Error ? err.message : String(err))}`);
   }
+  lines.push(`mode: ${config.mode ?? "ondemand"} ${color.dim("(Claude Code plugin auto-quiz)")}`);
   for (const p of await listProviders(config)) {
     lines.push(`provider ${p.name}: ${p.available ? color.green("available") : color.dim("not found")}`);
   }

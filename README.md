@@ -155,6 +155,27 @@ Then, inside a session: `/diffquiz:diffquiz`, or just ask Claude to "quiz me
 on my diff before I open this PR." See
 [`plugin/diffquiz/README.md`](./plugin/diffquiz/README.md) for details.
 
+Installing the plugin also ships a PreToolUse hook that matches `git push`
+and `gh pr create` inside Claude Code sessions; it is fail-open and can only
+defer a command, never block it — see
+[SECURITY.md](./SECURITY.md#the-auto-mode-hook) for exactly what it does.
+
+### Modes
+
+- **`ondemand`** (default) — quiz only when you ask for it.
+- **`auto`** — the hook above defers `git push`/`gh pr create` inside a
+  Claude Code session until you've been quizzed on the current diff, then
+  the command proceeds; wrong answers never block it. **A plain-terminal
+  `git push` outside a Claude Code session is not intercepted.**
+
+Switch with `/diffquiz:auto`, `/diffquiz:ondemand`, `/diffquiz:status`. The
+mode lives only in your user-global config — a repo's `.diffquiz.json`
+cannot set it (see [Configuration](#configuration) below). After a
+completed quiz a marker is written
+(`~/.cache/diffquiz/quizzed-<repo-hash>`, recording `HEAD` and a timestamp,
+valid 60 minutes) so a retried push isn't quizzed twice; new commits
+invalidate it and re-trigger the quiz.
+
 ## Configuration
 
 Precedence (highest wins): **CLI flags > environment variables > repo

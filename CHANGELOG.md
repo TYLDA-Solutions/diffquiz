@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-02
+
+### Added
+
+- Claude Code plugin modes: `ondemand` (default — quiz only when asked) and
+  `auto` (a PreToolUse hook intercepts `git push` and `gh pr create` inside
+  Claude Code sessions, has Claude quiz the author first, then the command
+  proceeds — wrong answers never block anything).
+- `/diffquiz:auto`, `/diffquiz:ondemand`, `/diffquiz:status` — switch and
+  inspect the mode. It lives only in the user-global config
+  (`DIFFQUIZ_CONFIG`/`$XDG_CONFIG_HOME`/`~/.config/diffquiz/config.json`); a
+  repo's `.diffquiz.json` cannot set it.
+- Pre-push quiz marker (`~/.cache/diffquiz/quizzed-<repo-hash>`, or under
+  `$DIFFQUIZ_CACHE_DIR`/XDG cache paths) as the loop breaker for `auto`
+  mode: records the `HEAD` sha and a timestamp, valid 60 minutes for the
+  same `HEAD`, so a retried push after a completed quiz isn't quizzed
+  again — new commits re-trigger it.
+- `diffquiz doctor` now also displays the current mode.
+
+### Unchanged
+
+- The standalone CLI's own behavior is unaffected by modes — `mode` is a
+  plugin-only concept the CLI already tolerates as an unknown config key.
+
+[0.2.0]: https://github.com/TYLDA-Solutions/diffquiz/releases/tag/v0.2.0
+
 ## [0.1.0] - 2026-09-01
 
 ### Added

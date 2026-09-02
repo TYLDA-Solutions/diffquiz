@@ -64,6 +64,28 @@ for the full breakdown of what leaves your machine.
 Run `diffquiz doctor` to see what diffquiz detects as available on your
 machine right now.
 
+### Does auto mode block my push if I answer wrongly?
+
+No. Wrong answers only get explained, same as everywhere else in diffquiz —
+the `auto`-mode hook cares whether a quiz happened for the current `HEAD`,
+not how well you did on it. It defers `git push`/`gh pr create` inside a
+Claude Code session until a quiz has run, then the command proceeds
+regardless of score. And if anything goes wrong inside the hook itself —
+malformed input, an unreadable config, whatever — it fails open and lets
+the command through; a quiz helper must never be able to break your git
+workflow. One important caveat: this only covers Claude Code sessions — a
+`git push` from a plain terminal is never intercepted. See
+[SECURITY.md](../SECURITY.md#the-auto-mode-hook) for the full mechanics.
+
+### Why doesn't auto mode work in fully autonomous agent runs?
+
+Because there's no human to quiz, and no human means nothing to measure.
+diffquiz's whole premise is that a person checks their own understanding
+before asking someone else to review their change; in a fully autonomous
+run there's nobody on the other end to ask. When the skill runs in a
+context with no human present to answer, it suggests switching to
+`/diffquiz:ondemand` rather than pretend a quiz happened.
+
 ### Why can't my repo's `.diffquiz.json` set a custom command?
 
 Because `.diffquiz.json` is checked into the repo, and the repo is exactly

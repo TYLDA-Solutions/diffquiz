@@ -93,6 +93,9 @@ async function readRepoConfigFile(root: string): Promise<DiffQuizConfig> {
   const filePath = join(root, CONFIG_FILENAME);
   const parsed = await readJsonConfigFile(filePath, CONFIG_FILENAME);
   if (parsed === undefined) return {};
+  // Workflow mode is the user's own choice, never the repo's; dropped
+  // silently (unlike customCommand it is not a code path, just noise).
+  delete parsed.mode;
   const config = validateConfigObject(parsed, CONFIG_FILENAME);
   stripRepoOnlyKeys(config);
   return config;
@@ -214,6 +217,14 @@ function validateConfigObject(obj: Record<string, unknown>, source: string): Dif
       );
     }
     config.customCommand = v as string[];
+  }
+
+  if ("mode" in obj) {
+    const v = obj.mode;
+    if (v !== "auto" && v !== "ondemand") {
+      throw new DiffQuizError("BAD_CONFIG", `"mode" in ${source} must be "auto" or "ondemand".`, "mode");
+    }
+    config.mode = v;
   }
 
   // Unknown keys are intentionally ignored for forward compatibility.

@@ -1,6 +1,6 @@
 {
   "name": "diffquiz",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A 60-second quiz on your own diff before you open the PR. Non-blocking, human-focused, runs on the LLM CLI you already use.",
   "keywords": [
     "pull-request",

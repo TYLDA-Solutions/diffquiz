@@ -67,6 +67,40 @@ A custom provider command can only come from your own user-global config
 `~/.config/diffquiz/config.json`) or the `DIFFQUIZ_CUSTOM_COMMAND`
 environment variable — both live outside anything a `git clone` can touch.
 
+### The auto-mode hook
+
+Installing the Claude Code plugin ships a PreToolUse hook
+(`plugin/diffquiz/hooks/pre-push-quiz.mjs`) that runs only inside Claude
+Code sessions. It matches `git push` and `gh pr create` anywhere in a Bash
+command string and, in `auto` mode, can **defer** such a command — never
+**veto** it — until you've been quizzed on the current `HEAD`. Concretely:
+the hook returns a permission decision of "deny" with a reason telling
+Claude to run the quiz with you and then retry the original command; wrong
+answers are never checked by the hook, it only cares whether a quiz
+happened.
+
+**Loop breaker (quiz marker):** after a completed quiz, the skill writes a
+marker file (`~/.cache/diffquiz/quizzed-<repo-hash>`, or under
+`$DIFFQUIZ_CACHE_DIR`/XDG cache paths) recording the `HEAD` sha and a
+timestamp. The hook treats a marker as fresh when it matches the current
+`HEAD` and is less than 60 minutes old, and only reads it — it never writes
+one itself. New commits change `HEAD`, which invalidates the marker and
+re-triggers the quiz on the next push attempt.
+
+**Fail-open:** any error inside the hook — malformed stdin, an unreadable
+config, a missing `HOME`, anything unexpected — exits allowing the command
+through. A quiz helper must never be able to break your git workflow.
+
+**Trust boundary:** exactly like `customCommand` above, the `mode` key can
+only be set in your own user-global config (`DIFFQUIZ_CONFIG`,
+`$XDG_CONFIG_HOME/diffquiz/config.json`, or `~/.config/diffquiz/config.json`)
+— a repo's `.diffquiz.json` can never set it and is silently ignored if it
+tries. Whether pushes get intercepted at all is entirely your own machine's
+choice, never the cloned repo's.
+
+**Scope:** the hook only runs inside Claude Code sessions. A `git push` from
+a plain terminal, another editor, or a CI job is never intercepted.
+
 ### Subprocess isolation
 
 The `claude` and `codex` subprocesses run with their working directory
