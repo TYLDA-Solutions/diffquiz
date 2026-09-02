@@ -155,6 +155,154 @@ test("renderTerminal: compact colored summary with counts", () => {
   assert.match(text, /q3/);
 });
 
+// ---------------------------------------------------------------------------
+// FIX 3 — markdown escaping of model-derived strings
+// ---------------------------------------------------------------------------
+
+function makeHostileQuiz(): Quiz {
+  return {
+    generatedBy: "claude",
+    questions: [
+      {
+        id: "q1",
+        kind: "behavior",
+        question: "Does this break out</details> of the block?",
+        options: [
+          "![tracking pixel](http://evil.example/pixel.png)",
+          "[click me](http://evil.example/phish)",
+          "uses a `backtick` and a | pipe",
+          "plain option",
+        ],
+        // correctIndex/chosenIndex determine which *single* option string
+        // ends up in the rendered "- Correct:"/"- Chosen:" lines (the block
+        // does not dump the full options array) — point them at the option
+        // strings this test needs to see escaped.
+        correctIndex: 2,
+        explanation: "See ![x](http://evil.example) and [a](b) plus `code` | pipe.",
+        diffRefs: [{ file: "src/</details>evil.ts", lines: [1] }],
+      },
+    ],
+  };
+}
+
+test("renderMarkdown: escapes </details> in the question so it cannot break the PR comment structure", () => {
+  const quiz = makeHostileQuiz();
+  const md = renderMarkdown(quiz, null, null, makeMeta());
+  assert.doesNotMatch(md, /Does this break out<\/details>/);
+  assert.match(md, /Does this break out&lt;\/details&gt;/);
+  // Exactly one real <details> open/close pair (from the wrapper), not one
+  // extra opened/closed by the injected string.
+  assert.equal((md.match(/<details>/g) ?? []).length, 1);
+  assert.equal((md.match(/<\/details>/g) ?? []).length, 1);
+});
+
+function makeHostileResult(chosenIndex: number, correct: boolean): QuizResult {
+  return {
+    answers: [{ questionId: "q1", chosenIndex, correct }],
+    correctCount: correct ? 1 : 0,
+    questionCount: 1,
+    durationMs: 1000,
+    playedAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
+test("renderMarkdown: neutralizes image/link markdown syntax in options and explanation", () => {
+  const quiz = makeHostileQuiz();
+  // chosenIndex 0 -> "Chosen:" renders the tracking-pixel image option;
+  // chosenIndex 1 (click me) is exercised in a second pass below.
+  const md = renderMarkdown(quiz, makeHostileResult(1, false), null, makeMeta());
+  assert.doesNotMatch(md, /!\[tracking pixel\]\(http:\/\/evil\.example\/pixel\.png\)/);
+  assert.doesNotMatch(md, /\[click me\]\(http:\/\/evil\.example\/phish\)/);
+  assert.doesNotMatch(md, /\[a\]\(b\)/);
+  assert.doesNotMatch(md, /!\[x\]\(http:\/\/evil\.example\)/);
+  // Escaped forms are present instead ("Chosen:" = click-me link option).
+  assert.match(md, /\\\[click me\\\]\\\(http:\/\/evil\.example\/phish\\\)/);
+  assert.match(md, /See !\\\[x\\\]\\\(http:\/\/evil\.example\\\) and \\\[a\\\]\\\(b\\\)/);
+
+  const md2 = renderMarkdown(quiz, makeHostileResult(0, false), null, makeMeta());
+  assert.doesNotMatch(md2, /!\[tracking pixel\]\(http:\/\/evil\.example\/pixel\.png\)/);
+  assert.match(md2, /!\\\[tracking pixel\\\]\\\(http:\/\/evil\.example\/pixel\.png\\\)/);
+});
+
+test("renderMarkdown: escapes backticks and pipes in options/explanation", () => {
+  const quiz = makeHostileQuiz();
+  const md = renderMarkdown(quiz, null, null, makeMeta());
+  assert.doesNotMatch(md, /uses a `backtick` and a \| pipe/);
+  assert.match(md, /Correct: uses a \\`backtick\\` and a \\\| pipe/);
+  assert.match(md, /plus \\`code\\` \\\| pipe/);
+});
+
+test("renderMarkdown: escapes diffRefs file paths too", () => {
+  const quiz = makeHostileQuiz();
+  const md = renderMarkdown(quiz, null, null, makeMeta());
+  assert.doesNotMatch(md, /Refs: src\/<\/details>evil\.ts/);
+  assert.match(md, /Refs: src\/&lt;\/details&gt;evil\.ts/);
+});
+
+test("renderTerminal and renderPrint: do NOT markdown-escape (plain text for TTY)", () => {
+  const quiz = makeHostileQuiz();
+  const result: QuizResult = {
+    answers: [{ questionId: "q1", chosenIndex: 0, correct: true }],
+    correctCount: 1,
+    questionCount: 1,
+    durationMs: 1000,
+    playedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const terminalText = renderTerminal(quiz, result, makeMeta());
+  assert.doesNotMatch(terminalText, /&lt;|&gt;/);
+
+  const printText = renderPrint(quiz);
+  assert.match(printText, /Does this break out<\/details> of the block\?/);
+  assert.match(printText, /!\[tracking pixel\]\(http:\/\/evil\.example\/pixel\.png\)/);
+  assert.doesNotMatch(printText, /&lt;|&gt;/);
+});
+
+// ---------------------------------------------------------------------------
+// FIX 4 — divergence section when runs failed
+// ---------------------------------------------------------------------------
+
+test("renderMarkdown: divergence section warns when every run failed (all answers null)", () => {
+  const quiz = makeQuiz();
+  const result = makeResult(0);
+  const divergence: DivergenceReport = {
+    runs: [
+      { run: 0, answers: { q1: null, q2: null, q3: null } },
+      { run: 1, answers: { q1: null, q2: null, q3: null } },
+      { run: 2, answers: { q1: null, q2: null, q3: null } },
+    ],
+    perQuestion: [
+      { questionId: "q1", distinctAnswers: [], diverged: false, scattered: false, agreeWithKey: 0 },
+      { questionId: "q2", distinctAnswers: [], diverged: false, scattered: false, agreeWithKey: 0 },
+      { questionId: "q3", distinctAnswers: [], diverged: false, scattered: false, agreeWithKey: 0 },
+    ],
+    flaggedQuestionIds: [],
+  };
+  const md = renderMarkdown(quiz, result, divergence, makeMeta());
+  assert.doesNotMatch(md, /No questions flagged — independent runs agreed\./);
+  assert.match(md, /No usable divergence data — all 3 runs failed/);
+});
+
+test("renderMarkdown: divergence section notes partial usable runs", () => {
+  const quiz = makeQuiz();
+  const result = makeResult(1);
+  const divergence: DivergenceReport = {
+    runs: [
+      { run: 0, answers: { q1: 0, q2: 1, q3: 2 } },
+      { run: 1, answers: { q1: null, q2: null, q3: null } },
+      { run: 2, answers: { q1: null, q2: null, q3: null } },
+    ],
+    perQuestion: [
+      { questionId: "q1", distinctAnswers: [0], diverged: false, scattered: false, agreeWithKey: 1 },
+      { questionId: "q2", distinctAnswers: [1], diverged: false, scattered: false, agreeWithKey: 1 },
+      { questionId: "q3", distinctAnswers: [2], diverged: false, scattered: false, agreeWithKey: 1 },
+    ],
+    flaggedQuestionIds: [],
+  };
+  const md = renderMarkdown(quiz, result, divergence, makeMeta());
+  assert.match(md, /No questions flagged — independent runs agreed\./);
+  assert.match(md, /\(1 of 3 runs usable\)/);
+});
+
 test("renderPrint: marks the correct option for every question", () => {
   const quiz = makeQuiz();
   const text = renderPrint(quiz);

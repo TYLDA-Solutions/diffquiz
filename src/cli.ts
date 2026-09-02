@@ -170,8 +170,7 @@ async function confirmSecrets(diff: DiffSummary, opts: CliOptions): Promise<void
   }
 }
 
-async function prepare(opts: CliOptions, cwd: string): Promise<{ diff: DiffSummary; provider: Provider }> {
-  const config = await loadConfig(cwd);
+async function prepare(opts: CliOptions, cwd: string, config: DiffQuizConfig): Promise<{ diff: DiffSummary; provider: Provider }> {
   const diff = await collectDiff({
     cwd,
     ...(opts.base !== undefined ? { base: opts.base } : {}),
@@ -181,6 +180,9 @@ async function prepare(opts: CliOptions, cwd: string): Promise<{ diff: DiffSumma
   });
   await confirmSecrets(diff, opts);
   const provider = await resolveProvider(opts.provider, config);
+  if (provider.name === "custom" && opts.model !== undefined) {
+    process.stderr.write(color.dim("note: --model has no effect with the custom provider; put the model into customCommand.\n"));
+  }
   return { diff, provider };
 }
 
@@ -194,7 +196,7 @@ function meta(diff: DiffSummary, provider: Provider, opts: CliOptions): ReportMe
   };
 }
 
-async function runPlay(opts: CliOptions, cwd: string): Promise<void> {
+async function runPlay(opts: CliOptions, cwd: string, config: DiffQuizConfig): Promise<void> {
   if (!opts.print && !process.stdin.isTTY) {
     throw new DiffQuizError(
       "BAD_USAGE",
@@ -203,7 +205,7 @@ async function runPlay(opts: CliOptions, cwd: string): Promise<void> {
     );
   }
 
-  const { diff, provider } = await prepare(opts, cwd);
+  const { diff, provider } = await prepare(opts, cwd, config);
   process.stderr.write(color.dim(`Generating ${opts.questions} questions via ${provider.name} (${diff.baseDescription})…\n`));
   const quiz = await generateQuiz(diff, provider, {
     count: opts.questions,
@@ -213,7 +215,11 @@ async function runPlay(opts: CliOptions, cwd: string): Promise<void> {
   });
 
   if (opts.print) {
-    process.stdout.write(renderPrint(quiz));
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify({ quiz }, null, 2)}\n`);
+    } else {
+      process.stdout.write(renderPrint(quiz));
+    }
     if (opts.out !== undefined) {
       await writeFile(opts.out, renderMarkdown(quiz, null, null, meta(diff, provider, opts)), "utf8");
       process.stderr.write(color.dim(`Markdown report written to ${opts.out}\n`));
@@ -232,10 +238,12 @@ async function runPlay(opts: CliOptions, cwd: string): Promise<void> {
     }
     throw err;
   }
-  process.stdout.write(renderTerminal(quiz, result, meta(diff, provider, opts)));
-
   if (opts.json) {
+    // stdout stays clean, parseable JSON; the human summary moves to stderr.
+    process.stderr.write(renderTerminal(quiz, result, meta(diff, provider, opts)));
     process.stdout.write(`${JSON.stringify({ quiz, result }, null, 2)}\n`);
+  } else {
+    process.stdout.write(renderTerminal(quiz, result, meta(diff, provider, opts)));
   }
   if (opts.out !== undefined) {
     await writeFile(opts.out, renderMarkdown(quiz, result, null, meta(diff, provider, opts)), "utf8");
@@ -243,8 +251,8 @@ async function runPlay(opts: CliOptions, cwd: string): Promise<void> {
   }
 }
 
-async function runDiverge(opts: CliOptions, cwd: string): Promise<void> {
-  const { diff, provider } = await prepare(opts, cwd);
+async function runDiverge(opts: CliOptions, cwd: string, config: DiffQuizConfig): Promise<void> {
+  const { diff, provider } = await prepare(opts, cwd, config);
   process.stderr.write(color.dim(`Generating ${opts.questions} questions via ${provider.name} (${diff.baseDescription})…\n`));
   const quiz = await generateQuiz(diff, provider, {
     count: opts.questions,
@@ -261,13 +269,27 @@ async function runDiverge(opts: CliOptions, cwd: string): Promise<void> {
     timeoutMs: opts.timeoutMs,
   });
 
+  // A run whose answers are all null produced no usable data; total failure
+  // must never be reported as agreement.
+  const usableRuns = divergence.runs.filter((r) => Object.values(r.answers).some((a) => a !== null)).length;
+  if (usableRuns === 0) {
+    throw new DiffQuizError(
+      "PROVIDER_FAILED",
+      `All ${opts.runs} divergence runs failed to produce answers.`,
+      "There is no agreement signal in failed runs. Check the provider with `diffquiz doctor` and retry.",
+    );
+  }
+  if (usableRuns < opts.runs) {
+    process.stderr.write(color.yellow(`warning: only ${usableRuns} of ${opts.runs} runs produced usable answers.\n`));
+  }
+
   if (opts.json) {
     process.stdout.write(`${JSON.stringify({ quiz, divergence }, null, 2)}\n`);
   } else {
     const flagged = divergence.flaggedQuestionIds;
     process.stdout.write(renderPrint(quiz));
     if (flagged.length === 0) {
-      process.stdout.write(color.green(`\nNo divergence across ${opts.runs} runs — the change reads unambiguously.\n`));
+      process.stdout.write(color.green(`\nNo divergence across ${usableRuns} runs — the change reads unambiguously.\n`));
     } else {
       process.stdout.write(color.yellow(`\nDivergence on ${flagged.length} question(s): ${flagged.join(", ")}\n`));
       process.stdout.write("Where independent readers disagree, the change is ambiguous or underspecified.\n");
@@ -298,9 +320,10 @@ async function runDoctor(cwd: string): Promise<void> {
 
 async function main(): Promise<void> {
   const cwd = process.cwd();
+  const config = await loadConfig(cwd);
   let opts: CliOptions;
   try {
-    opts = parseCli(process.argv.slice(2), await loadConfig(cwd));
+    opts = parseCli(process.argv.slice(2), config);
   } catch (err) {
     if (err instanceof DiffQuizError) throw err;
     throw new DiffQuizError("BAD_USAGE", err instanceof Error ? err.message : String(err), "Run diffquiz --help for usage.");
@@ -308,10 +331,10 @@ async function main(): Promise<void> {
 
   switch (opts.command) {
     case "play":
-      await runPlay(opts, cwd);
+      await runPlay(opts, cwd, config);
       break;
     case "diverge":
-      await runDiverge(opts, cwd);
+      await runDiverge(opts, cwd, config);
       break;
     case "doctor":
       await runDoctor(cwd);

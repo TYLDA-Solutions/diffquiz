@@ -172,6 +172,65 @@ test("playQuiz: allows injected streams without an isTTY property (test streams)
   assert.equal(result.correctCount, 1);
 });
 
+// ---------------------------------------------------------------------------
+// FIX 5 — EOF on a non-TTY stream must abort, not hang
+// ---------------------------------------------------------------------------
+
+/** Rejects with a timeout error if `promise` doesn't settle within `ms`. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    delay(ms).then(() => {
+      throw new Error(`${label} did not settle within ${ms}ms — playQuiz hung`);
+    }),
+  ]);
+}
+
+test("playQuiz: EOF before any answer throws AbortError instead of hanging", async () => {
+  const quiz = makeQuiz();
+  const { input, output } = makeIo();
+
+  const resultPromise = playQuiz(quiz, { input, output });
+  input.end(); // EOF immediately, no answer ever written
+
+  await assert.rejects(
+    () => withTimeout(resultPromise, 2000, "playQuiz"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as Error).name, "AbortError");
+      return true;
+    },
+  );
+});
+
+test("playQuiz: EOF mid-quiz (after answering some questions) throws AbortError instead of hanging", async () => {
+  const quiz = makeQuiz();
+  const { input, output } = makeIo();
+
+  const resultPromise = playQuiz(quiz, { input, output });
+  // Answer q1 only, then end the stream — q2 is left hanging.
+  await sendAnswersPaced(input, ["1"]);
+
+  await assert.rejects(
+    () => withTimeout(resultPromise, 2000, "playQuiz"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as Error).name, "AbortError");
+      return true;
+    },
+  );
+});
+
+test("playQuiz: injected test streams without isTTY still work end-to-end after the EOF fix", async () => {
+  const quiz = makeQuiz();
+  const { input, output } = makeIo();
+  const resultPromise = playQuiz(quiz, { input, output });
+  await sendAnswersPaced(input, ["1", "2", "3"]);
+  const result = await withTimeout(resultPromise, 2000, "playQuiz");
+  assert.equal(result.questionCount, 3);
+  assert.equal(result.answers.length, 3);
+});
+
 test("playQuiz: header mentions question count and that nothing blocks", async () => {
   const quiz = makeQuiz();
   const { input, output, getOutput } = makeIo();

@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { extractJson, validateAnswers, validateQuiz } from "../src/jsonx.ts";
+import { extractJson, sanitizeModelText, validateAnswers, validateQuiz } from "../src/jsonx.ts";
 import { DiffQuizError, type Quiz } from "../src/types.ts";
 
 function validQuestion(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -240,6 +240,147 @@ describe("validateQuiz — violations", () => {
     expectInvalid({
       questions: [validQuestion({ explanation: "" }), validQuestion(), validQuestion()],
     });
+  });
+});
+
+describe("sanitizeModelText — ANSI/OSC/control-char stripping", () => {
+  test("strips a complete CSI sequence (e.g. cursor move / color codes)", () => {
+    assert.equal(sanitizeModelText("hello\x1b[31mworld\x1b[0m"), "helloworld");
+  });
+
+  test("strips a complete CSI sequence that clears the screen", () => {
+    assert.equal(sanitizeModelText("before\x1b[2Jafter"), "beforeafter");
+  });
+
+  test("strips a complete OSC sequence terminated by BEL", () => {
+    assert.equal(sanitizeModelText("click \x1b]8;;https://evil.example\x07here\x1b]8;;\x07 now"), "click here now");
+  });
+
+  test("strips a complete OSC sequence terminated by ST (ESC \\\\)", () => {
+    assert.equal(sanitizeModelText("title\x1b]0;pwned\x1b\\done"), "titledone");
+  });
+
+  test("strips a bare/incomplete escape char", () => {
+    assert.equal(sanitizeModelText("weird\x1bnottrailing"), "weirdnottrailing");
+  });
+
+  test("strips other C0 control chars (bell, backspace, vertical tab)", () => {
+    assert.equal(sanitizeModelText("a\x07b\x08c\x0Bd"), "abcd");
+  });
+
+  test("keeps newlines and tabs", () => {
+    assert.equal(sanitizeModelText("line one\nline\ttwo"), "line one\nline\ttwo");
+  });
+
+  test("leaves ordinary text untouched", () => {
+    assert.equal(sanitizeModelText("nothing weird here, just text."), "nothing weird here, just text.");
+  });
+});
+
+describe("validateQuiz — sanitizes hostile escape sequences in accepted strings", () => {
+  test("strips ANSI/OSC injection from question, options, and explanation", () => {
+    const payload = {
+      questions: [
+        validQuestion({
+          question: "What does \x1b[31mthis\x1b[0m change?",
+          options: [
+            "Option \x1b]8;;https://evil.example\x07A\x1b]8;;\x07",
+            "Option B",
+            "Option C",
+            "Option D",
+          ],
+          explanation: "It changes \x1b[2Jbehavior at src/x.ts:1. Nothing else happens.",
+        }),
+      ],
+    };
+    const quiz = validateQuiz(payload, { count: 1 });
+    const q = quiz.questions[0]!;
+    assert.equal(q.question, "What does this change?");
+    assert.equal(q.options[0], "Option A");
+    assert.ok(!/\x1b/.test(q.explanation));
+    assert.ok(q.explanation.includes("It changes behavior at src/x.ts:1."));
+  });
+
+  test("strips hostile sequences from diffRefs file strings", () => {
+    const payload = {
+      questions: [
+        validQuestion({
+          diffRefs: [{ file: "src/\x1b[31mx\x1b[0m.ts", lines: [1] }],
+        }),
+      ],
+    };
+    const quiz = validateQuiz(payload, { count: 1 });
+    assert.deepEqual(quiz.questions[0]!.diffRefs, [{ file: "src/x.ts", lines: [1] }]);
+  });
+
+  test("a string that is nothing but stripped escape sequences still fails as empty", () => {
+    const payload = {
+      questions: [validQuestion({ question: "\x1b[31m\x1b[0m\x07" })],
+    };
+    assert.throws(
+      () => validateQuiz(payload, { count: 1 }),
+      (err: unknown) => err instanceof DiffQuizError && err.code === "INVALID_MODEL_OUTPUT",
+    );
+  });
+
+  test("a diffRefs entry that is nothing but stripped escape sequences is dropped, not kept empty", () => {
+    const payload = {
+      questions: [
+        validQuestion({
+          diffRefs: [
+            { file: "\x1b[31m\x1b[0m", lines: [1] }, // becomes "" after sanitizing — must be dropped
+            { file: "src/y.ts", lines: [2] },
+          ],
+        }),
+      ],
+    };
+    const quiz = validateQuiz(payload, { count: 1 });
+    assert.deepEqual(quiz.questions[0]!.diffRefs, [{ file: "src/y.ts", lines: [2] }]);
+  });
+});
+
+describe("limitToTwoSentences boundary regex (via validateQuiz explanation trimming)", () => {
+  function trimExplanation(explanation: string): string {
+    const quiz = validateQuiz(
+      { questions: [validQuestion({ explanation })] },
+      { count: 1 },
+    );
+    return quiz.questions[0]!.explanation;
+  }
+
+  test('does not mis-split on "??" mid-sentence (the verified bug)', () => {
+    const result = trimExplanation(
+      "This replaces the ?? 0 fallback with X. Callers will now crash. A third sentence should be dropped.",
+    );
+    assert.equal(result, "This replaces the ?? 0 fallback with X. Callers will now crash.");
+  });
+
+  test('does not mis-split on "e.g." inside a sentence', () => {
+    const result = trimExplanation("For example, e.g. this works fine. It does not break existing callers.");
+    assert.equal(result, "For example, e.g. this works fine. It does not break existing callers.");
+  });
+
+  test("does not mis-split on a decimal number", () => {
+    const result = trimExplanation("The threshold is 3.14 by default at src/x.ts:1. It was 2.0 before that.");
+    assert.equal(result, "The threshold is 3.14 by default at src/x.ts:1. It was 2.0 before that.");
+  });
+
+  test("does not mis-split on a filename like cart.js", () => {
+    const result = trimExplanation("This touches cart.js directly at src/x.ts:1. It does not touch checkout.js.");
+    assert.equal(result, "This touches cart.js directly at src/x.ts:1. It does not touch checkout.js.");
+  });
+
+  test('"Really??" is recognized as a genuine sentence ending', () => {
+    const result = trimExplanation("Did the migration break prod? Really?? This third sentence should be dropped.");
+    assert.equal(result, "Did the migration break prod? Really??");
+  });
+
+  test("a genuine three-sentence explanation is trimmed to the first two", () => {
+    const result = trimExplanation(
+      "First point stands here at src/x.ts:1. Second point continues the thought. Third point must be dropped entirely.",
+    );
+    assert.equal(result, "First point stands here at src/x.ts:1. Second point continues the thought.");
+    assert.ok(!result.includes("Third point"));
   });
 });
 

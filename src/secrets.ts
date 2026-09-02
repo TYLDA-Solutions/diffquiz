@@ -14,29 +14,30 @@ export interface SecretFinding {
 
 interface SecretPattern {
   kind: string;
+  /** Must carry the `g` flag: every match on a line is reported, not just the first. */
   regex: RegExp;
   /** Substring to redact for the excerpt; defaults to the whole match. */
-  extractSecret?: (match: RegExpExecArray) => string;
+  extractSecret?: (match: RegExpMatchArray) => string;
 }
 
 const SECRET_PATTERNS: SecretPattern[] = [
   // AWS access key IDs: fixed "AKIA" prefix + 16 uppercase alphanumerics.
-  { kind: "aws-access-key", regex: /\bAKIA[0-9A-Z]{16}\b/ },
+  { kind: "aws-access-key", regex: /\bAKIA[0-9A-Z]{16}\b/g },
   // GitHub personal access tokens (classic + fine-grained) share stable prefixes.
-  { kind: "github-token", regex: /\b(?:ghp|gho)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
+  { kind: "github-token", regex: /\b(?:ghp|gho)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g },
   // Slack bot/user/app/refresh tokens: "xox" + one of b/a/p/r/s + "-".
-  { kind: "slack-token", regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
+  { kind: "slack-token", regex: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
   // PEM-style private key block header (RSA/EC/DSA/OpenSSH/plain).
-  { kind: "private-key", regex: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |)PRIVATE KEY-----/ },
+  { kind: "private-key", regex: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |)PRIVATE KEY-----/g },
   // JWTs: header and payload are base64url JSON, so both conventionally
   // start with "eyJ" (the encoding of `{"`); three dot-separated segments.
-  { kind: "jwt", regex: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/ },
+  { kind: "jwt", regex: /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g },
   // OpenAI/Anthropic-style API keys.
-  { kind: "sk-key", regex: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
+  { kind: "sk-key", regex: /\bsk-[A-Za-z0-9_-]{16,}\b/g },
   // Generic "key/secret/token/password = <16+ char value>" assignment.
   {
     kind: "generic-secret",
-    regex: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*['"]?([A-Za-z0-9_\-/+=]{16,})['"]?/i,
+    regex: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*['"]?([A-Za-z0-9_\-/+=]{16,})['"]?/gi,
     extractSecret: (m) => m[1] ?? m[0] ?? "",
   },
 ];
@@ -69,9 +70,8 @@ function scanPatch(path: string, patch: string): SecretFinding[] {
     if (rawLine.startsWith("+")) {
       const content = rawLine.slice(1);
       for (const pattern of SECRET_PATTERNS) {
-        const match = pattern.regex.exec(content);
-        if (match) {
-          const secret = pattern.extractSecret ? pattern.extractSecret(match) : match[0];
+        for (const match of content.matchAll(pattern.regex)) {
+          const secret = pattern.extractSecret ? pattern.extractSecret(match) : (match[0] ?? "");
           findings.push({ file: path, line: newLine, kind: pattern.kind, excerpt: redact(secret) });
         }
       }

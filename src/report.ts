@@ -20,8 +20,39 @@ function formatRefs(refs: DiffRef[]): string {
   return refs.map((r) => `${r.file}:${r.lines.join(",")}`).join(", ");
 }
 
+// Markdown-only refs formatter — escapes file paths, since diffRefs.file is
+// ultimately model-derived (see escapeMarkdown below). formatRefs() above
+// stays unescaped for the terminal/--print paths.
+function formatRefsMarkdown(refs: DiffRef[]): string {
+  if (refs.length === 0) return "none";
+  return refs.map((r) => `${escapeMarkdown(r.file)}:${r.lines.join(",")}`).join(", ");
+}
+
+/**
+ * Escapes model-derived text before it is interpolated into markdown that
+ * becomes a PR comment. Two threats: (1) a literal `</details>` (or any
+ * `<`/`>`) in a question/option/explanation breaking the surrounding
+ * <details>/<summary> HTML structure, and (2) markdown link/image syntax
+ * (`[text](url)` / `![alt](url)`) enabling link-spoofing or tracking-pixel
+ * injection when the comment is pasted/rendered. Backticks and pipes are
+ * also escaped so stray code-span/table syntax can't leak through either.
+ * Terminal renderers (renderTerminal/renderPrint) must NOT use this — they
+ * render plain text directly to a TTY, not GFM.
+ */
+function escapeMarkdown(text: string): string {
+  return text
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/`/g, "\\`")
+    .replace(/\|/g, "\\|")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)");
+}
+
 function questionSummaryLine(q: QuizQuestion, index: number): string {
-  return `Q${index + 1} [${q.kind}] ${q.question}`;
+  return `Q${index + 1} [${q.kind}] ${escapeMarkdown(q.question)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -40,12 +71,12 @@ function markdownQuestionBlock(
   lines.push(`<summary>${questionSummaryLine(q, index)}${badge}</summary>`);
   lines.push("");
   if (result !== null && answer !== undefined) {
-    const chosenText = answer.chosenIndex === null ? "_not answered_" : q.options[answer.chosenIndex];
+    const chosenText = answer.chosenIndex === null ? "_not answered_" : escapeMarkdown(q.options[answer.chosenIndex] ?? "");
     lines.push(`- Chosen: ${chosenText}`);
   }
-  lines.push(`- Correct: ${q.options[q.correctIndex]}`);
-  lines.push(`- Explanation: ${q.explanation}`);
-  lines.push(`- Refs: ${formatRefs(q.diffRefs)}`);
+  lines.push(`- Correct: ${escapeMarkdown(q.options[q.correctIndex] ?? "")}`);
+  lines.push(`- Explanation: ${escapeMarkdown(q.explanation)}`);
+  lines.push(`- Refs: ${formatRefsMarkdown(q.diffRefs)}`);
   lines.push("");
   lines.push(`</details>`);
   return lines.join("\n");
@@ -55,7 +86,19 @@ function markdownDivergenceSection(quiz: Quiz, divergence: DivergenceReport): st
   const lines: string[] = [];
   lines.push(`### ⚠️ Divergence check`);
   lines.push("");
-  lines.push(`${divergence.runs.length} independent answer run(s).`);
+
+  const totalRuns = divergence.runs.length;
+  const usableRuns = divergence.runs.filter((r) => Object.values(r.answers).some((a) => a !== null)).length;
+
+  if (usableRuns === 0) {
+    lines.push(`${totalRuns} independent answer run(s).`);
+    lines.push("");
+    lines.push(`⚠️ No usable divergence data — all ${totalRuns} runs failed.`);
+    return lines.join("\n");
+  }
+
+  const usableNote = usableRuns < totalRuns ? ` (${usableRuns} of ${totalRuns} runs usable)` : "";
+  lines.push(`${totalRuns} independent answer run(s).${usableNote}`);
   lines.push("");
   if (divergence.flaggedQuestionIds.length === 0) {
     lines.push(`No questions flagged — independent runs agreed.`);

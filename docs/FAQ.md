@@ -42,7 +42,7 @@ non-generated, non-lockfile files) instead of refusing outright.
 No. TYLDA Solutions GmbH publishes diffquiz as open source and receives
 nothing from your usage of it — there's no telemetry, no analytics, no
 callback of any kind built into the tool. Your diff goes only to the LLM CLI
-you've configured (`claude`, `codex`, or your own `customCommand`), running
+you've configured (`claude`, `codex`, or your own custom command), running
 on your machine under your own account. See [SECURITY.md](../SECURITY.md)
 for the full breakdown of what leaves your machine.
 
@@ -53,9 +53,28 @@ for the full breakdown of what leaves your machine.
 - **`codex`** — the Codex CLI (`codex exec`). Supported, marked
   experimental: its non-interactive flag surface is less stable across
   versions, so behaviour is best-effort.
-- **Anything else** via `customCommand` in `.diffquiz.json` — any CLI that
+- **Anything else** via `customCommand` in your **user-global** config file
+  (or the `DIFFQUIZ_CUSTOM_COMMAND` environment variable) — any CLI that
   reads a prompt on stdin and writes its completion to stdout works
-  (`llm`, `gemini`, `ollama run <model>`, an internal wrapper, etc.).
+  (`llm`, `gemini`, `ollama run <model>`, an internal wrapper, etc.). See
+  Configuration in the [README](../README.md#configuration) for the exact
+  file locations. It is never read from a repo's own `.diffquiz.json` — see
+  the next question.
 
 Run `diffquiz doctor` to see what diffquiz detects as available on your
 machine right now.
+
+### Why can't my repo's `.diffquiz.json` set a custom command?
+
+Because `.diffquiz.json` is checked into the repo, and the repo is exactly
+the thing you're about to run diffquiz on — often before you've read it. If
+`customCommand` worked from that file, cloning a hostile repo and running
+`diffquiz` inside it would execute whatever command its author put there,
+no different from a malicious `postinstall` script. So `"provider":
+"custom"` and `"customCommand"` are silently ignored (with a stderr
+warning) when they come from the repo's `.diffquiz.json`; a custom provider
+can only come from your own user-global config file or the
+`DIFFQUIZ_CUSTOM_COMMAND` environment variable — both live outside anything
+a `git clone` can touch. Every other repo-file setting (`provider:
+claude/codex/auto`, `model`, `questions`, `maxLines`, `secretScan`,
+`timeoutSeconds`, `language`) still works exactly as before.

@@ -1,6 +1,6 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -31,24 +31,35 @@ after(() => {
 // ---------------------------------------------------------------------------
 
 describe("buildClaudeArgs", () => {
-  test("print mode with JSON output and tools disabled, no model", () => {
-    assert.deepEqual(buildClaudeArgs({}), ["-p", "--output-format", "json", "--tools", ""]);
+  const BASE_ARGS = [
+    "-p",
+    "--output-format",
+    "json",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--setting-sources",
+    "user",
+  ];
+
+  test("print mode with JSON output, tools disabled, MCP/settings isolation, no model", () => {
+    assert.deepEqual(buildClaudeArgs({}), BASE_ARGS);
   });
 
   test("appends --model when a model is given", () => {
-    assert.deepEqual(buildClaudeArgs({ model: "sonnet" }), [
-      "-p",
-      "--output-format",
-      "json",
-      "--tools",
-      "",
-      "--model",
-      "sonnet",
-    ]);
+    assert.deepEqual(buildClaudeArgs({ model: "sonnet" }), [...BASE_ARGS, "--model", "sonnet"]);
   });
 
   test("omits --model for an empty string model", () => {
-    assert.deepEqual(buildClaudeArgs({ model: "" }), ["-p", "--output-format", "json", "--tools", ""]);
+    assert.deepEqual(buildClaudeArgs({ model: "" }), BASE_ARGS);
+  });
+
+  test("includes --strict-mcp-config and --setting-sources user (verified against `claude --help`)", () => {
+    const args = buildClaudeArgs({});
+    assert.ok(args.includes("--strict-mcp-config"));
+    const idx = args.indexOf("--setting-sources");
+    assert.ok(idx !== -1);
+    assert.equal(args[idx + 1], "user");
   });
 });
 
@@ -90,6 +101,102 @@ describe("buildCodexArgs", () => {
 
   test("appends --model when given", () => {
     assert.deepEqual(buildCodexArgs({ model: "gpt-5-codex" }), ["exec", "--model", "gpt-5-codex"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// claude.ts / codex.ts — cwd isolation (security fix): the subprocess must
+// run with cwd pinned to a fresh empty temp dir, never the target repo's
+// cwd, and that temp dir must be cleaned up afterward. Verified against fake
+// `claude`/`codex` executables prepended onto PATH that just report their
+// own process.cwd() back.
+// ---------------------------------------------------------------------------
+
+describe("claude/codex subprocess cwd isolation", () => {
+  let fakeBinDir: string;
+  let originalPath: string | undefined;
+  let originalCwd: string;
+
+  before(() => {
+    fakeBinDir = mkdtempSync(join(tmpdir(), "diffquiz-fakebin-"));
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = [fakeBinDir, originalPath ?? ""].join(":");
+    originalCwd = process.cwd();
+  });
+
+  after(() => {
+    rmSync(fakeBinDir, { recursive: true, force: true });
+    if (originalPath === undefined) {
+      delete process.env["PATH"];
+    } else {
+      process.env["PATH"] = originalPath;
+    }
+  });
+
+  test("claudeProvider.complete runs with cwd pinned to a fresh temp dir, cleaned up after", async () => {
+    const script = join(fakeBinDir, "claude");
+    writeFileSync(
+      script,
+      `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: process.cwd() }));
+process.exit(0);
+`,
+      { mode: 0o755 },
+    );
+
+    const reportedCwd = await claudeProvider.complete("prompt", { timeoutMs: 5000 });
+
+    assert.notEqual(reportedCwd, originalCwd, "claude subprocess ran with the test process's own cwd");
+    assert.ok(
+      reportedCwd.includes("diffquiz-claude-cwd-"),
+      `expected an isolated diffquiz-claude-cwd- temp dir, got ${reportedCwd}`,
+    );
+    assert.equal(existsSync(reportedCwd), false, "isolated temp cwd was not cleaned up after the call");
+  });
+
+  test("codexProvider.complete runs with cwd pinned to a fresh temp dir, cleaned up after", async () => {
+    const script = join(fakeBinDir, "codex");
+    writeFileSync(
+      script,
+      `#!/usr/bin/env node
+process.stdout.write(process.cwd());
+process.exit(0);
+`,
+      { mode: 0o755 },
+    );
+
+    const reportedCwd = await codexProvider.complete("prompt", { timeoutMs: 5000 });
+
+    assert.notEqual(reportedCwd, originalCwd, "codex subprocess ran with the test process's own cwd");
+    assert.ok(
+      reportedCwd.includes("diffquiz-codex-cwd-"),
+      `expected an isolated diffquiz-codex-cwd- temp dir, got ${reportedCwd}`,
+    );
+    assert.equal(existsSync(reportedCwd), false, "isolated temp cwd was not cleaned up after the call");
+  });
+
+  test("isolated temp cwd is cleaned up even when the subprocess fails", async () => {
+    const script = join(fakeBinDir, "claude");
+    writeFileSync(
+      script,
+      `#!/usr/bin/env node
+process.stderr.write(process.cwd());
+process.exit(1);
+`,
+      { mode: 0o755 },
+    );
+
+    let capturedCwd = "";
+    await assert.rejects(
+      claudeProvider.complete("prompt", { timeoutMs: 5000 }),
+      (err: unknown) => {
+        assert.ok(err instanceof DiffQuizError);
+        capturedCwd = err.hint ?? "";
+        return true;
+      },
+    );
+    assert.ok(capturedCwd.includes("diffquiz-claude-cwd-"));
+    assert.equal(existsSync(capturedCwd), false, "isolated temp cwd was not cleaned up after a failed call");
   });
 });
 

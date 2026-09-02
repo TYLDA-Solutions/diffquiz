@@ -173,3 +173,12 @@ test("line numbers track the new file version across context and added lines", (
   assert.equal(findings.length, 1);
   assert.equal(findings[0]?.line, 12);
 });
+
+test("two same-kind secrets on one added line both surface", () => {
+  const key1 = "AKIAABCDEFGHIJKLMNOP";
+  const key2 = "AKIAQRSTUVWXYZ234567";
+  const patch = hunk("@@ -1,1 +1,1 @@", [`+const keys = ["${key1}", "${key2}"];`]);
+  const findings = scanForSecrets(makeDiff([makeFile("src/multi.ts", patch)]));
+  const aws = findings.filter((f) => f.kind === "aws-access-key");
+  assert.equal(aws.length, 2);
+});

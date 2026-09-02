@@ -13,6 +13,9 @@ const ENV_KEYS = [
   "DIFFQUIZ_MAX_LINES",
   "DIFFQUIZ_TIMEOUT",
   "DIFFQUIZ_LANG",
+  "DIFFQUIZ_CUSTOM_COMMAND",
+  "DIFFQUIZ_CONFIG",
+  "XDG_CONFIG_HOME",
 ] as const;
 
 function snapshotEnv(): Record<string, string | undefined> {
@@ -39,14 +42,42 @@ function makeRepoRoot(): string {
   return dir;
 }
 
+/**
+ * Runs `fn` with a clean env AND `DIFFQUIZ_CONFIG` pointed at a guaranteed
+ * non-existent path inside a fresh temp dir, so the new user-global config
+ * layer resolves to `{}` deterministically — tests never touch the real
+ * `~/.config/diffquiz/config.json` on the machine running them. Tests that
+ * want to exercise the global layer override `DIFFQUIZ_CONFIG` themselves.
+ */
 async function withCleanEnv(fn: () => Promise<void>): Promise<void> {
   const snap = snapshotEnv();
   clearEnv();
+  const envTmp = mkdtempSync(join(tmpdir(), "diffquiz-config-env-"));
+  process.env.DIFFQUIZ_CONFIG = join(envTmp, "does-not-exist.json");
   try {
     await fn();
   } finally {
+    rmSync(envTmp, { recursive: true, force: true });
     restoreEnv(snap);
   }
+}
+
+/** Captures everything written to stderr while `fn` runs. */
+async function withCapturedStderr(fn: () => Promise<void>): Promise<string> {
+  const original = process.stderr.write.bind(process.stderr);
+  let output = "";
+  process.stderr.write = ((chunk: unknown, ...rest: unknown[]): boolean => {
+    output += typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8");
+    const cb = rest.find((a) => typeof a === "function") as (() => void) | undefined;
+    cb?.();
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = original;
+  }
+  return output;
 }
 
 test("loads config file from repo root", async (t) => {
@@ -104,17 +135,6 @@ test("unknown keys are ignored without error", async (t) => {
     const config = await loadConfig(root);
     assert.deepEqual(config, { provider: "codex" });
     assert.equal("someFutureKey" in config, false);
-  });
-});
-
-test("customCommand array of strings loads correctly", async (t) => {
-  await withCleanEnv(async () => {
-    const root = makeRepoRoot();
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ customCommand: ["llm", "-m", "gpt-5"] }));
-
-    const config = await loadConfig(root);
-    assert.deepEqual(config, { customCommand: ["llm", "-m", "gpt-5"] });
   });
 });
 
@@ -227,6 +247,169 @@ for (const { name, env } of invalidEnvCases) {
       const root = makeRepoRoot();
       t.after(() => rmSync(root, { recursive: true, force: true }));
       for (const [k, v] of Object.entries(env)) process.env[k] = v;
+
+      await assert.rejects(
+        () => loadConfig(root),
+        (err: unknown) => err instanceof DiffQuizError && err.code === "BAD_CONFIG",
+      );
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Trust model: repo .diffquiz.json cannot supply customCommand or
+// provider:"custom" (arbitrary code execution on checkout+run).
+// ---------------------------------------------------------------------------
+
+test("repo file customCommand is ignored, with a warning to stderr", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(
+      join(root, ".diffquiz.json"),
+      JSON.stringify({ provider: "codex", customCommand: ["rm", "-rf", "/tmp/whatever"] }),
+    );
+
+    let config: Awaited<ReturnType<typeof loadConfig>> = {};
+    const stderr = await withCapturedStderr(async () => {
+      config = await loadConfig(root);
+    });
+
+    assert.deepEqual(config, { provider: "codex" });
+    assert.equal("customCommand" in config, false);
+    assert.ok(stderr.includes("ignoring customCommand from repo .diffquiz.json"));
+    assert.ok(stderr.includes("DIFFQUIZ_CUSTOM_COMMAND"));
+  });
+});
+
+test('repo file provider:"custom" is ignored, with a warning to stderr', async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ provider: "custom", questions: 4 }));
+
+    let config: Awaited<ReturnType<typeof loadConfig>> = {};
+    const stderr = await withCapturedStderr(async () => {
+      config = await loadConfig(root);
+    });
+
+    assert.deepEqual(config, { questions: 4 });
+    assert.equal("provider" in config, false);
+    assert.ok(stderr.toLowerCase().includes('ignoring provider "custom" from repo .diffquiz.json'));
+  });
+});
+
+test("repo file with other provider values (not custom) is honored normally", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ provider: "claude" }));
+
+    const stderr = await withCapturedStderr(async () => {
+      const config = await loadConfig(root);
+      assert.deepEqual(config, { provider: "claude" });
+    });
+    assert.equal(stderr, "");
+  });
+});
+
+test("global user config honors customCommand and provider:custom", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+
+    const globalDir = mkdtempSync(join(tmpdir(), "diffquiz-global-"));
+    t.after(() => rmSync(globalDir, { recursive: true, force: true }));
+    const globalPath = join(globalDir, "config.json");
+    writeFileSync(globalPath, JSON.stringify({ provider: "custom", customCommand: ["llm", "-m", "gpt-5"] }));
+    process.env.DIFFQUIZ_CONFIG = globalPath;
+
+    const config = await loadConfig(root);
+    assert.deepEqual(config, { provider: "custom", customCommand: ["llm", "-m", "gpt-5"] });
+  });
+});
+
+test("DIFFQUIZ_CONFIG override is honored as the global config path", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+
+    const globalDir = mkdtempSync(join(tmpdir(), "diffquiz-global-"));
+    t.after(() => rmSync(globalDir, { recursive: true, force: true }));
+    const globalPath = join(globalDir, "somewhere-custom.json");
+    writeFileSync(globalPath, JSON.stringify({ language: "fr" }));
+    process.env.DIFFQUIZ_CONFIG = globalPath;
+
+    const config = await loadConfig(root);
+    assert.deepEqual(config, { language: "fr" });
+  });
+});
+
+test("repo config overrides global config for shared keys; global fills in the rest", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ model: "repo-model" }));
+
+    const globalDir = mkdtempSync(join(tmpdir(), "diffquiz-global-"));
+    t.after(() => rmSync(globalDir, { recursive: true, force: true }));
+    const globalPath = join(globalDir, "config.json");
+    writeFileSync(globalPath, JSON.stringify({ model: "global-model", language: "de", customCommand: ["llm"] }));
+    process.env.DIFFQUIZ_CONFIG = globalPath;
+
+    const config = await loadConfig(root);
+    // repo overrides "model"; repo doesn't set "language" so global's wins;
+    // repo doesn't set customCommand at all here so global's (allowed at
+    // that layer) is not stripped — it was never subject to repo stripping.
+    assert.deepEqual(config, { model: "repo-model", language: "de", customCommand: ["llm"] });
+  });
+});
+
+test("env wins over both global and repo config", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    writeFileSync(join(root, ".diffquiz.json"), JSON.stringify({ model: "repo-model" }));
+
+    const globalDir = mkdtempSync(join(tmpdir(), "diffquiz-global-"));
+    t.after(() => rmSync(globalDir, { recursive: true, force: true }));
+    const globalPath = join(globalDir, "config.json");
+    writeFileSync(globalPath, JSON.stringify({ model: "global-model", customCommand: ["global-llm"] }));
+    process.env.DIFFQUIZ_CONFIG = globalPath;
+
+    process.env.DIFFQUIZ_MODEL = "env-model";
+    process.env.DIFFQUIZ_CUSTOM_COMMAND = JSON.stringify(["env-llm", "-m", "x"]);
+
+    const config = await loadConfig(root);
+    assert.deepEqual(config, { model: "env-model", customCommand: ["env-llm", "-m", "x"] });
+  });
+});
+
+test("DIFFQUIZ_CUSTOM_COMMAND: valid JSON array is honored", async (t) => {
+  await withCleanEnv(async () => {
+    const root = makeRepoRoot();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+
+    process.env.DIFFQUIZ_CUSTOM_COMMAND = JSON.stringify(["gemini", "-m", "flash"]);
+    const config = await loadConfig(root);
+    assert.deepEqual(config, { customCommand: ["gemini", "-m", "flash"] });
+  });
+});
+
+const invalidCustomCommandEnvCases: Array<{ name: string; value: string }> = [
+  { name: "not valid JSON", value: "not json at all" },
+  { name: "JSON object instead of array", value: JSON.stringify({ cmd: "llm" }) },
+  { name: "empty array", value: JSON.stringify([]) },
+  { name: "array with a non-string entry", value: JSON.stringify(["llm", 5]) },
+  { name: "array with an empty string entry", value: JSON.stringify(["llm", ""]) },
+];
+
+for (const { name, value } of invalidCustomCommandEnvCases) {
+  test(`DIFFQUIZ_CUSTOM_COMMAND validation error: ${name}`, async (t) => {
+    await withCleanEnv(async () => {
+      const root = makeRepoRoot();
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      process.env.DIFFQUIZ_CUSTOM_COMMAND = value;
 
       await assert.rejects(
         () => loadConfig(root),

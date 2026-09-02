@@ -1,18 +1,45 @@
 /**
- * Configuration loading: `.diffquiz.json` at the repo root, overridden by
- * `DIFFQUIZ_*` environment variables. CLI flags are merged on top of this by
- * cli.ts — this module returns file+env only.
+ * Configuration loading.
+ *
+ * Trust model (security-critical — see docs/SECURITY notes / audit fix):
+ * repo-committed `.diffquiz.json` is attacker-controlled the moment a
+ * hostile repo is checked out, so it must never be able to make diffquiz
+ * execute arbitrary code on the user's machine. Precedence, ascending
+ * (later wins):
+ *
+ *   (a) user-global config — path from `DIFFQUIZ_CONFIG`, else
+ *       `$XDG_CONFIG_HOME/diffquiz/config.json`, else
+ *       `~/.config/diffquiz/config.json`. This file is under the user's own
+ *       control, so ALL keys are honored, including `customCommand` and
+ *       `provider: "custom"`.
+ *   (b) repo-root `.diffquiz.json` — all keys honored EXCEPT
+ *       `customCommand` (ignored) and `provider: "custom"` (ignored; other
+ *       provider values are fine). A checked-out repo must not be able to
+ *       make diffquiz spawn an arbitrary command. A one-line warning is
+ *       written to stderr when either is stripped.
+ *   (c) environment variables — `DIFFQUIZ_*`, including
+ *       `DIFFQUIZ_CUSTOM_COMMAND` (a JSON array of argv strings).
+ *
+ * CLI flags are merged on top of this by cli.ts — this module returns
+ * file+env only.
  */
 import { readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DiffQuizError, type DiffQuizConfig } from "./types.ts";
 
 const CONFIG_FILENAME = ".diffquiz.json";
 const VALID_PROVIDERS = new Set(["claude", "codex", "auto", "custom"]);
+const REPO_CUSTOM_COMMAND_WARNING =
+  "ignoring customCommand from repo .diffquiz.json — configure custom providers in ~/.config/diffquiz/config.json or DIFFQUIZ_CUSTOM_COMMAND";
+const REPO_CUSTOM_PROVIDER_WARNING =
+  'ignoring provider "custom" from repo .diffquiz.json — configure custom providers in ~/.config/diffquiz/config.json or DIFFQUIZ_CUSTOM_COMMAND';
 
 export async function loadConfig(cwd: string): Promise<DiffQuizConfig> {
   const root = await findRepoRoot(cwd);
-  const config = await readConfigFile(root);
+  const globalConfig = await readGlobalConfigFile(globalConfigPath(process.env));
+  const repoConfig = await readRepoConfigFile(root);
+  const config: DiffQuizConfig = { ...globalConfig, ...repoConfig };
   applyEnvOverrides(config, process.env);
   return config;
 }
@@ -41,16 +68,58 @@ async function exists(path: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// file loading + validation
+// global (user-controlled) config file — all keys allowed
 // ---------------------------------------------------------------------------
 
-async function readConfigFile(root: string): Promise<DiffQuizConfig> {
+function globalConfigPath(env: NodeJS.ProcessEnv): string {
+  const explicit = env.DIFFQUIZ_CONFIG;
+  if (explicit !== undefined && explicit.trim() !== "") return explicit;
+  const xdg = env.XDG_CONFIG_HOME;
+  if (xdg !== undefined && xdg.trim() !== "") return join(xdg, "diffquiz", "config.json");
+  return join(homedir(), ".config", "diffquiz", "config.json");
+}
+
+async function readGlobalConfigFile(filePath: string): Promise<DiffQuizConfig> {
+  const parsed = await readJsonConfigFile(filePath, filePath);
+  if (parsed === undefined) return {};
+  return validateConfigObject(parsed, filePath);
+}
+
+// ---------------------------------------------------------------------------
+// repo-root config file — customCommand / provider:"custom" stripped
+// ---------------------------------------------------------------------------
+
+async function readRepoConfigFile(root: string): Promise<DiffQuizConfig> {
   const filePath = join(root, CONFIG_FILENAME);
+  const parsed = await readJsonConfigFile(filePath, CONFIG_FILENAME);
+  if (parsed === undefined) return {};
+  const config = validateConfigObject(parsed, CONFIG_FILENAME);
+  stripRepoOnlyKeys(config);
+  return config;
+}
+
+function stripRepoOnlyKeys(config: DiffQuizConfig): void {
+  if (config.customCommand !== undefined) {
+    delete config.customCommand;
+    process.stderr.write(`${REPO_CUSTOM_COMMAND_WARNING}\n`);
+  }
+  if (config.provider === "custom") {
+    delete config.provider;
+    process.stderr.write(`${REPO_CUSTOM_PROVIDER_WARNING}\n`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// shared file loading + validation
+// ---------------------------------------------------------------------------
+
+/** Returns `undefined` when the file does not exist (ENOENT). */
+async function readJsonConfigFile(filePath: string, source: string): Promise<Record<string, unknown> | undefined> {
   let raw: string;
   try {
     raw = await readFile(filePath, "utf8");
   } catch (err) {
-    if (isErrnoException(err) && err.code === "ENOENT") return {};
+    if (isErrnoException(err) && err.code === "ENOENT") return undefined;
     throw new DiffQuizError("BAD_CONFIG", `Could not read ${filePath}: ${(err as Error).message}`, filePath);
   }
 
@@ -58,14 +127,14 @@ async function readConfigFile(root: string): Promise<DiffQuizConfig> {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    throw new DiffQuizError("BAD_CONFIG", `Invalid JSON in ${CONFIG_FILENAME}: ${(err as Error).message}`, CONFIG_FILENAME);
+    throw new DiffQuizError("BAD_CONFIG", `Invalid JSON in ${source}: ${(err as Error).message}`, source);
   }
 
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new DiffQuizError("BAD_CONFIG", `${CONFIG_FILENAME} must contain a JSON object.`, CONFIG_FILENAME);
+    throw new DiffQuizError("BAD_CONFIG", `${source} must contain a JSON object.`, source);
   }
 
-  return validateConfigObject(parsed as Record<string, unknown>, CONFIG_FILENAME);
+  return parsed as Record<string, unknown>;
 }
 
 function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
@@ -209,5 +278,27 @@ function applyEnvOverrides(config: DiffQuizConfig, env: NodeJS.ProcessEnv): void
       throw new DiffQuizError("BAD_CONFIG", "DIFFQUIZ_LANG must not be empty.", "DIFFQUIZ_LANG");
     }
     config.language = lang;
+  }
+
+  const customCommand = env.DIFFQUIZ_CUSTOM_COMMAND;
+  if (customCommand !== undefined) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(customCommand);
+    } catch {
+      throw new DiffQuizError(
+        "BAD_CONFIG",
+        "DIFFQUIZ_CUSTOM_COMMAND must be a JSON array of argv strings.",
+        "DIFFQUIZ_CUSTOM_COMMAND",
+      );
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((x) => typeof x === "string" && x.length > 0)) {
+      throw new DiffQuizError(
+        "BAD_CONFIG",
+        "DIFFQUIZ_CUSTOM_COMMAND must be a non-empty JSON array of non-empty strings.",
+        "DIFFQUIZ_CUSTOM_COMMAND",
+      );
+    }
+    config.customCommand = parsed as string[];
   }
 }

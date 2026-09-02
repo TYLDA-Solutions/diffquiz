@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -271,6 +271,51 @@ test("collectDiff throws DIFF_TOO_LARGE when over budget and sample is false", a
     () => collectDiff({ cwd: dir, staged: false, maxLines: 50, sample: false }),
     (err: unknown) => err instanceof DiffQuizError && err.code === "DIFF_TOO_LARGE",
   );
+});
+
+// ---------------------------------------------------------------------------
+// collectDiff: FIX 1 — mode-only diffs (chmod) and FIX 2 — non-ASCII paths
+// ---------------------------------------------------------------------------
+
+test("collectDiff parses a mode-only change (chmod) with correct path and status", async (t) => {
+  const dir = makeTempRepo("main");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const filePath = join(dir, "script.sh");
+  writeFileSync(filePath, "#!/bin/sh\necho hi\n");
+  chmodSync(filePath, 0o644);
+  commitAll(dir, "init");
+
+  git(dir, ["checkout", "-q", "-b", "feature"]);
+  chmodSync(filePath, 0o755);
+  commitAll(dir, "chmod +x script.sh");
+
+  const summary = await collectDiff({ cwd: dir, staged: false, maxLines: 2000, sample: false });
+  assert.equal(summary.files.length, 1);
+  const file = summary.files[0];
+  assert.equal(file?.path, "script.sh");
+  assert.notEqual(file?.path, "unknown");
+  assert.equal(file?.status, "modified");
+  assert.equal(file?.linesAdded, 0);
+  assert.equal(file?.linesRemoved, 0);
+});
+
+test("collectDiff decodes non-ASCII filenames instead of leaving them octal-escaped", async (t) => {
+  const dir = makeTempRepo("main");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "base.txt"), "base\n");
+  commitAll(dir, "init");
+
+  git(dir, ["checkout", "-q", "-b", "feature"]);
+  const umlautName = "übung.txt";
+  writeFileSync(join(dir, umlautName), "hello\n");
+  git(dir, ["add", "--", umlautName]);
+  commitAll(dir, "add umlaut file");
+
+  const summary = await collectDiff({ cwd: dir, staged: false, maxLines: 2000, sample: false });
+  const file = summary.files.find((f) => f.path.includes("bung.txt"));
+  assert.ok(file, `expected a file with a decoded umlaut name, got: ${summary.files.map((f) => f.path).join(", ")}`);
+  assert.equal(file?.path, umlautName);
+  assert.doesNotMatch(file?.path ?? "", /\\\d{3}/);
 });
 
 test("collectDiff with sample=true drops lockfiles first and records truncationNotes", async (t) => {

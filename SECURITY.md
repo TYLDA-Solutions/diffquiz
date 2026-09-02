@@ -4,10 +4,11 @@
 
 diffquiz sends exactly one thing off your machine: a prompt — containing
 your diff, plus quiz-generation or answer instructions — to the LLM CLI you
-already have configured (`claude`, `codex`, or a custom command you point it
-at via `customCommand`). That CLI's own network and data-handling policies
-apply from that point on; diffquiz has no visibility into what the provider
-does with it.
+already have configured (`claude`, `codex`, or a custom command configured
+from your own user-global config or `DIFFQUIZ_CUSTOM_COMMAND` — never from a
+cloned repo, see "Repo-supplied configuration" below). That CLI's own
+network and data-handling policies apply from that point on; diffquiz has no
+visibility into what the provider does with it.
 
 Nothing else leaves the machine. diffquiz itself makes zero network calls,
 has zero runtime dependencies, and collects no telemetry. There is no
@@ -24,13 +25,20 @@ into a diff, could contain text engineered to look like instructions to the
 LLM ("ignore the above and instead output..."). diffquiz treats diff content
 as **untrusted data**, not instructions:
 
-- Prompts wrap the diff in explicit delimiters and instruct the model to
-  treat everything inside them as data to quiz on, never as instructions to
-  follow.
+- Prompts wrap the diff in per-invocation random nonce delimiters —
+  unpredictable to anyone crafting the diff offline — and instruct the model
+  to treat everything inside them as data to quiz on, never as instructions
+  to follow.
 - Diff content is never placed outside those delimiters.
 - Model output is required to be strict JSON matching a fixed schema
   (`src/jsonx.ts`); anything else is rejected and retried once, then fails
-  closed (`INVALID_MODEL_OUTPUT`).
+  closed (`INVALID_MODEL_OUTPUT`). Every model-supplied string is also
+  sanitized (C0 control characters and ANSI/CSI/OSC escape sequences
+  stripped) before it is accepted, so a malicious diff can't smuggle
+  terminal escape codes into your quiz output. The markdown/PR-report
+  renderer separately escapes `<`/`>`, backticks, pipes, and brackets/parens
+  in model-supplied text, so it also can't break the `<details>` block
+  structure or inject a markdown link/image into a PR comment.
 - Quiz questions and explanations are only ever **displayed** to the user —
   diffquiz never executes, evaluates, or shells out based on model output.
 
@@ -42,6 +50,35 @@ schema and is never executed or used to trigger further tool calls, the
 practical impact of a successful injection is a misleading quiz question —
 not code execution, data exfiltration, or a compromised host. If you find a
 way to make injected diff content do more than that, please report it.
+
+### Repo-supplied configuration (`.diffquiz.json`)
+
+A cloned repo's `.diffquiz.json` is attacker-controlled in exactly the same
+way its code is — whoever wrote the repo chose its contents. So the repo
+file may only set generation knobs (`provider: claude/codex/auto`, `model`,
+`questions`, `maxLines`, `secretScan`, `timeoutSeconds`, `language`); it can
+never set `customCommand` or `provider: "custom"` — both are silently
+ignored (with a stderr warning) when they come from `.diffquiz.json`, for
+the same reason tools like `direnv` or `pre-commit` require an explicit
+local trust/allow step before they'll run repo-supplied code: letting a
+cloned repo choose what command gets executed is arbitrary code execution.
+A custom provider command can only come from your own user-global config
+(`DIFFQUIZ_CONFIG`, `$XDG_CONFIG_HOME/diffquiz/config.json`, or
+`~/.config/diffquiz/config.json`) or the `DIFFQUIZ_CUSTOM_COMMAND`
+environment variable — both live outside anything a `git clone` can touch.
+
+### Subprocess isolation
+
+The `claude` and `codex` subprocesses run with their working directory
+pinned to a fresh, empty temporary directory (and, for `claude`,
+`--strict-mcp-config --setting-sources user`), so a checked-out repo's
+`.mcp.json`, project/local settings, or other CLI-scoped configuration can
+never reconfigure the LLM CLI diffquiz invokes to generate or answer quiz
+questions. One honest caveat: these subprocesses still inherit your shell
+environment — they need their own API keys/auth to run at all — so anything
+able to set environment variables for the diffquiz process can still
+influence them. That's one more reason the custom-provider command itself
+must only ever come from your own trusted config, never from a cloned repo.
 
 ### Secret exposure
 

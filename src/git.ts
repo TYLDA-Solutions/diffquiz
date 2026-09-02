@@ -180,7 +180,13 @@ async function revParse(cwd: string, ref: string): Promise<string> {
 }
 
 async function gitDiff(cwd: string, args: string[]): Promise<string> {
-  const res = await runGit(cwd, ["diff", "--no-color", "-M", ...args]);
+  // core.quotePath=false: without it, git C-style-escapes (octal-escapes)
+  // any non-ASCII byte in a path and wraps it in double quotes (e.g.
+  // "caf\303\251.txt" for "café.txt"). unquote() below only strips the
+  // surrounding quotes — it does not decode that escaping — so paths would
+  // otherwise come out mangled. Disabling quotePath makes git emit the raw
+  // UTF-8 bytes instead.
+  const res = await runGit(cwd, ["-c", "core.quotePath=false", "diff", "--no-color", "-M", ...args]);
   if (res.code !== 0) {
     throw new DiffQuizError(
       "NOT_A_REPO",
@@ -259,6 +265,21 @@ function parseChunk(chunkLines: string[]): DiffFile {
     }
   }
 
+  // Mode-only changes (e.g. `chmod +x` on a tracked file) produce a diff with
+  // only the `diff --git a/X b/X` header plus old/new mode lines — no ---/+++
+  // lines, so oldPath/newPath are never set above. Fall back to parsing the
+  // header line itself whenever both remain unset.
+  if (oldPath === undefined && newPath === undefined) {
+    const headerLine = chunkLines[0];
+    if (headerLine !== undefined) {
+      const headerPaths = parseDiffGitHeader(headerLine);
+      if (headerPaths) {
+        oldPath = headerPaths.oldPath;
+        newPath = headerPaths.newPath;
+      }
+    }
+  }
+
   let status: DiffFile["status"];
   let path: string;
   let finalOldPath: string | undefined;
@@ -311,6 +332,28 @@ function unquote(raw: string): string {
 function stripAbPrefix(raw: string): string {
   const s = unquote(raw);
   return s.startsWith("a/") || s.startsWith("b/") ? s.slice(2) : s;
+}
+
+// Fallback path source for diffs that carry no ---/+++ lines (mode-only
+// changes). Format: `diff --git a/<old> b/<new>`. With core.quotePath=false
+// (see gitDiff) the common case — including non-ASCII paths — is unquoted,
+// so a heuristic split on the " b/" separator is enough; paths containing a
+// literal " b/" substring are a known, accepted limitation of this format.
+// The (rarer) quoted form, e.g. when a path itself needs backslash/quote
+// escaping, is best-efforted via unquote() on each side.
+function parseDiffGitHeader(headerLine: string): { oldPath: string; newPath: string } | undefined {
+  const prefix = "diff --git ";
+  if (!headerLine.startsWith(prefix)) return undefined;
+  const rest = headerLine.slice(prefix.length);
+  const marker = " b/";
+  const idx = rest.indexOf(marker);
+  if (idx === -1) return undefined;
+  const left = unquote(rest.slice(0, idx));
+  const right = unquote(rest.slice(idx + 1));
+  const oldPath = left.startsWith("a/") ? left.slice(2) : left;
+  const newPath = right.startsWith("b/") ? right.slice(2) : right;
+  if (oldPath.length === 0 || newPath.length === 0) return undefined;
+  return { oldPath, newPath };
 }
 
 // ---------------------------------------------------------------------------

@@ -76,6 +76,26 @@ export function extractJson(text: string): unknown {
   );
 }
 
+/**
+ * Strips terminal/markdown-hostile sequences from model-supplied strings
+ * before they're accepted into a `Quiz`: complete ANSI CSI sequences (e.g.
+ * cursor moves, screen clears), complete OSC sequences (e.g. hyperlink/title
+ * injection, terminated by BEL or ST), and any remaining C0 control
+ * characters except `\n`/`\t`. This runs on every question, option,
+ * explanation, and diffRefs file string — the only place LLM output enters
+ * `Quiz`, so it's the single choke point that has to catch this.
+ */
+const CSI_SEQUENCE_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const OSC_SEQUENCE_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g;
+// Remaining C0 controls (0x00-0x1F minus \t=0x09, \n=0x0A) plus DEL (0x7F).
+// This range includes ESC (0x1B), which mops up any bare/incomplete escape
+// sequence left after the CSI/OSC passes above.
+const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+
+export function sanitizeModelText(text: string): string {
+  return text.replace(CSI_SEQUENCE_RE, "").replace(OSC_SEQUENCE_RE, "").replace(CONTROL_CHAR_RE, "");
+}
+
 const VALID_KINDS: readonly QuestionKind[] = ["behavior", "data", "failure", "no-change"];
 
 function coerceKind(raw: unknown): QuestionKind {
@@ -96,12 +116,17 @@ function coerceKind(raw: unknown): QuestionKind {
 
 /**
  * Keeps at most the first two sentences of `text`, trimmed. A sentence
- * boundary is `.`/`!`/`?` followed by whitespace-then-uppercase (or the end
- * of the string) — not just any period — so file citations like
- * `src/x.ts:12` don't get mistaken for a sentence break.
+ * boundary is `.`/`!`/`?` immediately preceded by a word/quote/paren
+ * character AND followed by whitespace-then-uppercase (or the end of the
+ * string) — not just any punctuation run. The lookbehind is what keeps a
+ * mid-sentence `??` (e.g. "replaces the ?? 0 fallback") from being
+ * mistaken for a boundary: the char right before that run is a space, not a
+ * word/quote/paren char, so it fails the lookbehind and sentence 2 survives.
+ * File citations like `src/x.ts:12` and decimals like `3.14` still don't
+ * false-trigger because they're never followed by whitespace.
  */
 function limitToTwoSentences(text: string): string {
-  const boundary = /[.!?]+(?=\s+[A-Z0-9"'(]|\s*$)/g;
+  const boundary = /(?<=[A-Za-z0-9)"'])[.!?]+(?=\s+[A-Z0-9"'(]|\s*$)/g;
   const sentences: string[] = [];
   let lastEnd = 0;
   let match: RegExpExecArray | null;
@@ -117,11 +142,21 @@ function limitToTwoSentences(text: string): string {
   return sentences.length > 0 ? sentences.join(" ").trim() : text.trim();
 }
 
+/**
+ * Requires a non-empty string, sanitizing terminal/markdown-hostile escape
+ * sequences (see `sanitizeModelText`) before the emptiness check — a string
+ * that's nothing but stripped control sequences must still fail validation
+ * rather than sneak through as "".
+ */
 function requireNonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  if (typeof value !== "string") {
     throw new DiffQuizError("INVALID_MODEL_OUTPUT", `Field "${label}" must be a non-empty string.`);
   }
-  return value.trim();
+  const cleaned = sanitizeModelText(value).trim();
+  if (cleaned.length === 0) {
+    throw new DiffQuizError("INVALID_MODEL_OUTPUT", `Field "${label}" must be a non-empty string.`);
+  }
+  return cleaned;
 }
 
 function extractDiffRefs(raw: unknown): DiffRef[] {
@@ -132,13 +167,15 @@ function extractDiffRefs(raw: unknown): DiffRef[] {
     const obj = entry as Record<string, unknown>;
     const file = obj["file"];
     const lines = obj["lines"];
-    if (typeof file !== "string" || file.trim().length === 0) continue;
+    if (typeof file !== "string") continue;
+    const cleanedFile = sanitizeModelText(file).trim();
+    if (cleanedFile.length === 0) continue;
     if (!Array.isArray(lines)) continue;
     const numericLines = lines.filter(
       (l): l is number => typeof l === "number" && Number.isInteger(l) && l > 0,
     );
     if (numericLines.length === 0) continue;
-    refs.push({ file: file.trim(), lines: numericLines });
+    refs.push({ file: cleanedFile, lines: numericLines });
   }
   return refs;
 }

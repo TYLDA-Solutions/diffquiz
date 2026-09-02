@@ -3,8 +3,23 @@ import { test } from "node:test";
 import { buildAnswerPrompt, buildGeneratePrompt } from "../src/prompts.ts";
 import type { DiffSummary, Quiz } from "../src/types.ts";
 
-const DIFF_OPEN = "<<<DIFF";
-const DIFF_CLOSE = "DIFF>>>";
+/**
+ * Delimiters carry a per-invocation random nonce (<<<DIFF_<nonce> …
+ * DIFF_<nonce>>>>), so tests extract them from the built prompt instead of
+ * hardcoding them.
+ */
+function extractDelimiters(prompt: string): { open: string; close: string; openIdx: number; closeIdx: number } {
+  const match = /<<<DIFF_([0-9a-f]{16})/.exec(prompt);
+  assert.ok(match, "missing nonce'd open delimiter");
+  const open = match[0];
+  const close = `DIFF_${match[1]}>>>`;
+  // The injection-guard prose may reference the tokens before the actual
+  // block, so the real block starts at the LAST open occurrence.
+  const openIdx = prompt.lastIndexOf(open);
+  const closeIdx = prompt.indexOf(close, openIdx + open.length);
+  assert.ok(closeIdx > openIdx, "missing or out-of-order close delimiter");
+  return { open, close, openIdx, closeIdx };
+}
 
 function makeDiff(overrides: Partial<DiffSummary> = {}): DiffSummary {
   return {
@@ -93,19 +108,21 @@ function makeQuiz(): Quiz {
   };
 }
 
-test("buildGeneratePrompt includes clear delimiters around the diff, in order", () => {
+test("buildGeneratePrompt includes nonce'd delimiters around the diff, in order", () => {
   const prompt = buildGeneratePrompt(makeDiff(), { count: 3, language: "en" });
-  assert.ok(prompt.includes(DIFF_OPEN), "missing open delimiter");
-  assert.ok(prompt.includes(DIFF_CLOSE), "missing close delimiter");
-  assert.ok(prompt.indexOf(DIFF_OPEN) < prompt.indexOf(DIFF_CLOSE), "delimiters out of order");
+  extractDelimiters(prompt);
+});
+
+test("buildGeneratePrompt uses a fresh nonce per invocation", () => {
+  const a = extractDelimiters(buildGeneratePrompt(makeDiff(), { count: 3, language: "en" }));
+  const b = extractDelimiters(buildGeneratePrompt(makeDiff(), { count: 3, language: "en" }));
+  assert.notEqual(a.open, b.open, "delimiter nonce must not repeat across invocations");
 });
 
 test("buildGeneratePrompt places all patch content inside the delimiters", () => {
   const diff = makeDiff();
   const prompt = buildGeneratePrompt(diff, { count: 3, language: "en" });
-  const openIdx = prompt.indexOf(DIFF_OPEN);
-  const closeIdx = prompt.indexOf(DIFF_CLOSE);
-  assert.ok(openIdx >= 0 && closeIdx > openIdx);
+  const { openIdx, closeIdx } = extractDelimiters(prompt);
 
   const patchLine = "if (user && user.isActive) return true;";
   const occurrences: number[] = [];
@@ -199,7 +216,7 @@ test("buildAnswerPrompt includes every question id, its text, and options, and d
     }
   }
   assert.ok(/strict json/i.test(prompt));
-  assert.ok(prompt.includes(DIFF_OPEN) && prompt.includes(DIFF_CLOSE));
+  extractDelimiters(prompt);
 });
 
 test("buildAnswerPrompt also frames the diff as untrusted data", () => {

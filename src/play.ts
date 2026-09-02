@@ -41,6 +41,60 @@ function writeLine(output: NodeJS.WritableStream, line = ""): void {
   output.write(`${line}\n`);
 }
 
+/**
+ * The `isTTY === false` guard alone doesn't catch a real pipe/non-TTY stream
+ * (isTTY is `undefined` there, not `false`), so a library caller driving
+ * playQuiz on a stream that hits EOF before answering would otherwise hang
+ * forever: `rl.question()` (readline/promises) never settles when the
+ * interface closes out from under a pending question.
+ *
+ * This races one `rl.question()` call against the interface's `close` event
+ * (fired when the input stream ends) and normalizes either outcome —
+ * close-wins, or `rl.question()` itself rejecting because the interface was
+ * already closed — into a single AbortError, mirroring what Ctrl+D/Ctrl+C
+ * does on a real TTY. Listeners are always cleaned up so nothing leaks
+ * across questions.
+ */
+function makeAbortError(): Error {
+  const err = new Error("diffquiz: input closed before an answer was given.");
+  err.name = "AbortError";
+  return err;
+}
+
+function questionOrAbort(rl: ReturnType<typeof createInterface>, prompt: string): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    const onClose = () => {
+      // 'close' can arrive in the same synchronous burst as the final 'line'
+      // event while rl.question()'s resolution is still a microtask away;
+      // deferring the abort lets an already-delivered answer win the race.
+      setImmediate(() => {
+        if (settled) return;
+        settled = true;
+        reject(makeAbortError());
+      });
+    };
+    rl.once("close", onClose);
+    rl.question(prompt).then(
+      (answer) => {
+        if (settled) return;
+        settled = true;
+        rl.off("close", onClose);
+        resolve(answer);
+      },
+      () => {
+        // readline rejects rl.question() itself when the interface is
+        // already closed ("readline was closed") — treat identically to
+        // the close-event race above.
+        if (settled) return;
+        settled = true;
+        rl.off("close", onClose);
+        reject(makeAbortError());
+      },
+    );
+  });
+}
+
 async function askQuestion(
   rl: ReturnType<typeof createInterface>,
   output: NodeJS.WritableStream,
@@ -58,7 +112,7 @@ async function askQuestion(
 
   let chosenIndex: number | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const raw = await rl.question(`${cyan("> ")}`);
+    const raw = await questionOrAbort(rl, `${cyan("> ")}`);
     const parsed = parseAnswer(raw);
     if (parsed !== null) {
       chosenIndex = parsed;

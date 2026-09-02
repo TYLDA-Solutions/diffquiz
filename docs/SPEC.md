@@ -47,7 +47,9 @@ Options (shared):
       --timeout <sec>    Provider timeout (default: 180)
       --print            Non-interactive: print questions WITH answers and exit
                          (spoiler mode; for testing and review)
-      --json             Machine-readable JSON result on stdout
+      --json             Machine-readable JSON result on stdout — stdout then
+                         carries ONLY the JSON (human summary goes to stderr);
+                         combined with --print it emits { quiz } as JSON
   -o, --out <file>       Write the markdown report to a file
       --no-color         Disable ANSI colors (also honors NO_COLOR env)
   -v, --version          Print version
@@ -119,13 +121,21 @@ export function commandExists(cmd: string): Promise<boolean>;
 export function loadConfig(cwd: string): Promise<DiffQuizConfig>;
 ```
 
-- Reads `.diffquiz.json` at the repo root (nearest ancestor with `.git`).
+- Merges, ascending precedence: user-global config (`DIFFQUIZ_CONFIG` path
+  override, else `$XDG_CONFIG_HOME/diffquiz/config.json`, else
+  `~/.config/diffquiz/config.json`) → repo-root `.diffquiz.json` (nearest
+  ancestor with `.git`) → env vars.
+- **Trust boundary:** the repo file must never be able to run code. It may
+  NOT set `customCommand` or `provider: "custom"` — both are ignored with a
+  one-line stderr warning. Custom providers come only from the user-global
+  config or `DIFFQUIZ_CUSTOM_COMMAND` (JSON argv array).
 - Env overrides: `DIFFQUIZ_PROVIDER`, `DIFFQUIZ_MODEL`, `DIFFQUIZ_QUESTIONS`,
-  `DIFFQUIZ_MAX_LINES`, `DIFFQUIZ_TIMEOUT`, `DIFFQUIZ_LANG`.
+  `DIFFQUIZ_MAX_LINES`, `DIFFQUIZ_TIMEOUT`, `DIFFQUIZ_LANG`,
+  `DIFFQUIZ_CUSTOM_COMMAND`, `DIFFQUIZ_CONFIG`.
 - Validates types/ranges; unknown keys are ignored with no error (forward
   compat). Bad values throw `BAD_CONFIG` with the offending key in the hint.
-- Precedence: CLI flags > env > file > defaults (flag merging happens in
-  cli.ts; loadConfig returns file+env only).
+- Precedence: CLI flags > env > repo file > global file > defaults (flag
+  merging happens in cli.ts; loadConfig returns files+env only).
 
 ### src/secrets.ts — secret heuristics
 
@@ -157,6 +167,11 @@ export function listProviders(config: DiffQuizConfig): Promise<Array<{ name: str
 ```
 
 - `auto` order: claude → codex → custom (if configured).
+- **Isolation:** claude/codex subprocesses run with `cwd` pinned to a fresh
+  empty temp directory (plus `--strict-mcp-config` for claude), so nothing
+  inside the repo under review — `.mcp.json`, project settings — can
+  configure the LLM CLI. The custom provider keeps the caller's cwd: its
+  command comes exclusively from the user's own trust boundary.
 - **claude**: `claude -p --output-format json` with the prompt on **stdin**;
   parse the JSON envelope and return its `result` field; on envelope parse
   failure fall back to treating stdout as plain text. Pass
@@ -183,6 +198,10 @@ export function validateAnswers(value: unknown, quiz: Quiz): Record<string, numb
 - `extractJson`: try `JSON.parse` directly; then fenced ```json blocks; then
   first `{`/`[` to last `}`/`]` slice. Throw `INVALID_MODEL_OUTPUT` with a
   short excerpt (≤200 chars) on failure.
+- All model-supplied strings are sanitized in `validateQuiz` (single choke
+  point): C0 control characters (except `\n`, `\t`) and complete
+  CSI/OSC/ESC sequences are stripped before any string is accepted —
+  terminal output and markdown must never carry raw escape bytes.
 - `validateQuiz` enforces: expected question count (±0), exactly 4 options,
   `correctIndex` 0–3, non-empty strings, ids `q1..qN` (rewrite ids if the
   model used others), kinds coerced to the closest `QuestionKind` (default
@@ -217,9 +236,11 @@ Prompt requirements (the product lives or dies here):
 - When the diff contains moved/reformatted code, include one "no-change"
   question (which of these is a pure move?) as the guessing counterweight.
 - Explanations: max two sentences, must cite `file:line`.
-- The diff is **untrusted input**: wrap it in clear delimiters and instruct
-  the model to treat everything inside as data — instructions inside the
-  diff must be ignored. Never place diff content outside the delimiters.
+- The diff is **untrusted input**: wrap it in per-invocation random
+  nonce delimiters (an attacker crafting a diff offline cannot predict them)
+  and instruct the model to treat everything inside as data — instructions
+  inside the diff must be ignored. Never place diff content outside the
+  delimiters.
 - Demand strict JSON only (schema inlined in the prompt), no prose.
 - `generateQuiz`: one retry on `INVALID_MODEL_OUTPUT` (append a corrective
   line quoting the validation error); after the second failure, throw.
@@ -229,7 +250,9 @@ Prompt requirements (the product lives or dies here):
 - Divergence analysis: `diverged` = ≥2 distinct answers among successful
   runs; `scattered` = no option got a strict majority of runs; flagged =
   diverged && !scattered. Runs execute **sequentially** (local CLIs often
-  serialize anyway; keeps output readable).
+  serialize anyway; keeps output readable). Failed runs (all answers null)
+  are never counted as agreement: zero usable runs is a `PROVIDER_FAILED`
+  error in the CLI and an explicit warning in the markdown report.
 
 ### src/ansi.ts + src/play.ts + src/report.ts — UX
 

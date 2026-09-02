@@ -24,8 +24,8 @@ change before someone else has to ask.
 ## Quick start
 
 Requires Node >= 22.18 and one of the `claude` or `codex` CLIs installed
-(or a `customCommand` pointed at any other LLM CLI — see
-[Configuration](#configuration)).
+(or a custom provider command configured in your own user-global config —
+see [Configuration](#configuration)).
 
 ```
 npm i -g diffquiz
@@ -43,11 +43,11 @@ Illustrative — the real questions depend entirely on your diff.
 
 ```
 $ diffquiz
-diffquiz — diff vs merge-base(HEAD, origin/main), 3 files, +42/-11
+Generating 3 questions via claude (merge-base(HEAD, origin/main))…
+diffquiz — 3 questions
+Wrong answers just get explained — nothing here blocks you.
 
-Generating quiz with claude...
-
-[1/3] behavior
+[behavior] Question 1/3
 What happens when `parseConfig()` receives a config file with no
 `provider` key?
 
@@ -57,12 +57,12 @@ What happens when `parseConfig()` receives a config file with no
   4) It retries with the previous config
 
 > 2
+✓ Correct
+`provider` is optional in DiffQuizConfig; when absent, resolveProvider()
+falls back to the auto-detection order.
+See: src/config.ts:34
 
-✓ Correct.
-src/config.ts:34 — `provider` is optional in DiffQuizConfig; when absent,
-resolveProvider() receives undefined and applies the auto-detection order.
-
-[2/3] failure
+[failure] Question 2/3
 If the diff exceeds --max-lines and --sample was not passed, what does
 diffquiz do?
 
@@ -72,12 +72,12 @@ diffquiz do?
   4) Prompts interactively for confirmation
 
 > 2
+✓ Correct
+Over-budget diffs without --sample throw DIFF_TOO_LARGE, with a hint that a
+smaller PR is the real fix.
+See: src/git.ts:96
 
-✓ Correct.
-src/git.ts:96 — over-budget diffs without --sample throw DIFF_TOO_LARGE,
-with a hint that a smaller PR is the real fix.
-
-[3/3] no-change
+[no-change] Question 3/3
 Which of these best describes the change in `src/report.ts`?
 
   1) The markdown renderer logic changed
@@ -86,14 +86,20 @@ Which of these best describes the change in `src/report.ts`?
   4) The function signature changed
 
 > 1
+✗ Not quite — correct answer: `renderTerminal` was moved below
+`renderPrint` with no logic change
+This is a pure relocation; diff the reordered block against itself and the
+bodies are identical.
+See: src/report.ts:180-210
 
-✗ Incorrect. Correct answer: 2.
-src/report.ts:180-210 — this is a pure relocation; diff the reordered block
-against itself and the bodies are identical.
-
-2/3 correct, finished in 41s
-Save a markdown report for your PR description? [y/N]
+2/3 in 41s
+diffquiz — 2/3 in 41s
+✓ q1  ✓ q2  ✗ q3
+via claude · diff vs merge-base(HEAD, origin/main)
 ```
+
+Pass `-o report.md` to also write a markdown report for the PR description
+(prints `Markdown report written to report.md` on stderr).
 
 ## How it works
 
@@ -151,10 +157,13 @@ on my diff before I open this PR." See
 
 ## Configuration
 
-Precedence: **CLI flags > environment variables > `.diffquiz.json` >
-defaults.**
+Precedence (highest wins): **CLI flags > environment variables > repo
+`.diffquiz.json` > user-global config > defaults.**
 
-`.diffquiz.json` at the repo root (nearest ancestor containing `.git`):
+### `.diffquiz.json` (repo, shareable)
+
+Committed at the repo root (nearest ancestor containing `.git`) — safe to
+check in, since it's meant to be shared with everyone who clones the repo:
 
 ```json
 {
@@ -164,13 +173,38 @@ defaults.**
   "maxLines": 2000,
   "secretScan": true,
   "timeoutSeconds": 180,
-  "language": "en",
-  "customCommand": ["llm", "-m", "gpt-5"]
+  "language": "en"
 }
 ```
 
-Unknown keys are ignored (forward compatible); invalid values throw with
-the offending key named in the error.
+**Trust boundary:** the repo file can never configure a custom command.
+`"provider": "custom"` and `"customCommand"` are silently ignored (with a
+one-line stderr warning) when they come from `.diffquiz.json` — otherwise
+cloning a hostile repo and running `diffquiz` in it could execute whatever
+command the repo's author chose. Every other key above still works from the
+repo file. Unknown keys are ignored (forward compatible); invalid values
+throw with the offending key named in the error.
+
+### User-global config / env (trusted: custom providers live here)
+
+A custom provider command can only come from your own machine, never from a
+cloned repo:
+
+- **User-global config file** — a JSON file with the same shape as
+  `.diffquiz.json`, plus `customCommand` and `"provider": "custom"`, which
+  are only honored here. Location: the path in `DIFFQUIZ_CONFIG`, else
+  `$XDG_CONFIG_HOME/diffquiz/config.json`, else
+  `~/.config/diffquiz/config.json`.
+- **`DIFFQUIZ_CUSTOM_COMMAND`** — a JSON array of argv strings, e.g.
+  `DIFFQUIZ_CUSTOM_COMMAND='["llm","-m","gpt-5"]'`.
+
+```json
+// ~/.config/diffquiz/config.json
+{
+  "provider": "custom",
+  "customCommand": ["llm", "-m", "gpt-5"]
+}
+```
 
 ### Environment variables
 
@@ -182,6 +216,8 @@ the offending key named in the error.
 | `DIFFQUIZ_MAX_LINES` | `maxLines` |
 | `DIFFQUIZ_TIMEOUT` | `timeoutSeconds` |
 | `DIFFQUIZ_LANG` | `language` |
+| `DIFFQUIZ_CUSTOM_COMMAND` | `customCommand` (JSON argv array — trusted, see above) |
+| `DIFFQUIZ_CONFIG` | path to the user-global config file |
 | `NO_COLOR` | disables ANSI colour, same as `--no-color` |
 
 ### CLI flags
@@ -215,8 +251,9 @@ diffquiz doctor                 Check environment: git, providers, config
 ## Privacy & security
 
 - **The diff goes to exactly one place:** the LLM CLI you already have
-  configured (`claude`, `codex`, or your `customCommand`), running locally
-  under your own account.
+  configured (`claude`, `codex`, or a custom command — configurable only
+  from your own trust boundary, never from a cloned repo; see
+  [Configuration](#configuration)), running locally under your own account.
 - **diffquiz itself has zero runtime dependencies, makes zero network
   calls, and has zero telemetry.** There is no account and nothing to sign
   up for.
@@ -225,9 +262,21 @@ diffquiz doctor                 Check environment: git, providers, config
   rather than blocking or proceeding silently. It's a heuristic, not a
   guarantee — don't rely on it as your only safeguard.
 - **Prompt-injection hardening:** the diff is treated as untrusted data,
-  wrapped in explicit delimiters, with the model instructed to ignore any
-  instructions it contains. Model output must be strict, schema-validated
-  JSON and is only ever displayed, never executed.
+  wrapped in per-invocation random nonce delimiters (unpredictable to
+  anyone crafting the diff offline), with the model instructed to ignore
+  any instructions it contains. Model output must be strict,
+  schema-validated JSON and is only ever displayed, never executed.
+- **Subprocess isolation:** the `claude`/`codex` subprocess runs with its
+  working directory pinned to a fresh, empty temp directory (plus
+  `--strict-mcp-config --setting-sources user` for `claude`), so a
+  checked-out repo's `.mcp.json` or project/local settings can never
+  reconfigure the LLM CLI diffquiz invokes.
+- **Output sanitization:** model-generated text is sanitized before it's
+  ever displayed — control characters and ANSI/CSI/OSC escape sequences are
+  stripped before any string is accepted into a quiz, and the markdown/PR
+  report additionally escapes `<`/`>`, backticks, pipes, and brackets so a
+  crafted diff can't break the report's structure or inject a markdown
+  link.
 
 Full threat model and vulnerability reporting: [SECURITY.md](./SECURITY.md).
 
