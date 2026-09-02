@@ -326,3 +326,80 @@ refuse with `SECRETS_DETECTED` unless `--no-secret-scan`.
 - No classes except error types; plain functions + interfaces.
 - Comments only where the code can't say it (see repo-wide conventions).
 - All user-facing strings in English.
+
+## v0.2.0 — Plugin modes (auto / on-demand)
+
+The Claude Code plugin gains a workflow mode. It changes WHEN the quiz
+happens, never WHETHER anything is allowed to proceed — the non-blocking
+principle is untouched.
+
+### Mode storage
+
+- New config key `mode: "auto" | "ondemand"` (default `"ondemand"`), valid
+  ONLY in the user-global config (`DIFFQUIZ_CONFIG` path override, else
+  `$XDG_CONFIG_HOME/diffquiz/config.json`, else
+  `~/.config/diffquiz/config.json`). A repo `.diffquiz.json` must never set
+  it (workflow interception is the user's own choice, like customCommand);
+  if present there it is ignored silently (no warning — it is not a code
+  path, just noise).
+- The CLI itself does not consume `mode` (unknown-key tolerance already
+  accepts it); only `diffquiz doctor` displays it.
+
+### Switch commands (plugin)
+
+`plugin/diffquiz/commands/auto.md`, `ondemand.md`, `status.md` →
+`/diffquiz:auto`, `/diffquiz:ondemand`, `/diffquiz:status`. auto/ondemand
+rewrite ONLY the `mode` key in the user-global config (create dir/file if
+missing, preserve all other keys, honor DIFFQUIZ_CONFIG and XDG paths);
+status prints the current mode and config path. All three confirm in one
+short line.
+
+### The hook (plugin)
+
+A PreToolUse hook on the Bash tool, shipped with the plugin, script at
+`plugin/diffquiz/hooks/pre-push-quiz.mjs` (plain Node, zero deps, invoked
+via `node "$CLAUDE_PLUGIN_ROOT/hooks/pre-push-quiz.mjs"`).
+
+Behavior:
+1. Reads the hook JSON from stdin; extracts the Bash command string.
+2. Matches push/PR intents: `git push` and `gh pr create` (word-boundary
+   match anywhere in the command). Everything else → allow.
+3. Reads `mode` from the user-global config. `ondemand`/unset → allow.
+4. `auto` → checks the quiz marker (below). Fresh marker → allow; missing
+   or stale → deny (permission decision "deny") with a reason instructing
+   Claude to run the diffquiz skill with the author first, then retry the
+   command — and, when no human is present to quiz, to switch to
+   `/diffquiz:ondemand` instead. Wrong quiz answers never matter.
+5. **Fail-open everywhere:** malformed stdin, unreadable config, missing
+   HOME, any exception → exit 0 (allow). A quiz helper must never be able
+   to break someone's git workflow.
+
+### Quiz marker (loop breaker)
+
+Without a marker, deny → quiz → retry push → deny again would loop.
+
+- Path: `$DIFFQUIZ_CACHE_DIR` override, else `$XDG_CACHE_HOME/diffquiz`,
+  else `~/.cache/diffquiz`; file `quizzed-<first 16 hex of sha256(absolute
+  repo root path)>`.
+- Content: JSON `{ "head": "<HEAD sha>", "at": "<ISO timestamp>" }`.
+- Fresh = recorded head equals the repo's current HEAD sha AND `at` is less
+  than 60 minutes old. New commits after the quiz therefore re-trigger it.
+- The SKILL flow writes the marker after a completed quiz (any score); the
+  hook only reads it. The CLI does not touch markers in v0.2.0.
+
+### SKILL.md additions
+
+- After a completed quiz: write the marker (mkdir -p the cache dir).
+- After a completed quiz, when the user-global config has no `mode` key:
+  offer once, in one sentence, `/diffquiz:auto` for automatic mode.
+- Never present the quiz as a gate; on auto-mode denials, quiz, then simply
+  continue the original command.
+
+### Tests
+
+`test/hook.test.ts` drives the hook script as a child process with crafted
+stdin + `DIFFQUIZ_CONFIG`/`DIFFQUIZ_CACHE_DIR`/`HOME` pointing at temp
+dirs: non-push command allows; ondemand allows; auto without marker denies
+with reason; auto with fresh marker allows; auto with stale/other-HEAD
+marker denies; malformed stdin allows; unreadable config allows. Marker
+hashing is verified against a real temp git repo.
