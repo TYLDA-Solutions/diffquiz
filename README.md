@@ -1,6 +1,13 @@
 # diffquiz
 
+[![CI](https://github.com/TYLDA-Solutions/diffquiz/actions/workflows/ci.yml/badge.svg)](https://github.com/TYLDA-Solutions/diffquiz/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+![Zero runtime dependencies](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)
+![Node >= 22.18](https://img.shields.io/badge/node-%3E%3D22.18-339933?logo=node.js&logoColor=white)
+
 **A 60-second quiz on your own diff before you open the PR.** 🎯
+
+![diffquiz: three questions about your diff, answered in the terminal — a wrong answer is explained immediately](docs/demo.gif)
 
 Coding agents write more code than humans read. diffquiz asks you 3-5
 multiple-choice questions about what your change actually does. Wrong
