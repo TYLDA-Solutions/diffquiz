@@ -41,6 +41,9 @@ function formatRefsMarkdown(refs: DiffRef[]): string {
  */
 function escapeMarkdown(text: string): string {
   return text
+    // Backslashes first: otherwise a model-supplied "\]" would become "\\]"
+    // — an escaped backslash followed by a live, unescaped bracket.
+    .replace(/\\/g, "\\\\")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/`/g, "\\`")

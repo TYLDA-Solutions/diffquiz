@@ -316,3 +316,14 @@ test("renderPrint: marks the correct option for every question", () => {
     assert.ok(text.includes(q.explanation));
   }
 });
+
+test("renderMarkdown: escapes backslashes so a model-supplied \\] cannot re-open bracket syntax", () => {
+  const quiz = makeQuiz();
+  const q0 = quiz.questions[0]!;
+  quiz.questions[0] = { ...q0, explanation: "Trick: \\] and \\( here" };
+  const md = renderMarkdown(quiz, null, null, makeMeta());
+  // Each special char is escaped on its own: "\]" -> "\\" + "\]".
+  assert.match(md, /Explanation: Trick: \\\\\\\] and \\\\\\\( here/);
+  // Never an escaped backslash followed by a live bracket/paren (the CodeQL finding).
+  assert.doesNotMatch(md, /[^\\]\\\\[\]\)]/);
+});

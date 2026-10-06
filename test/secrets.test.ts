@@ -82,7 +82,9 @@ test("github_pat_ token detected", () => {
 });
 
 test("Slack token detected", () => {
-  const token = "xoxb-1234567890-abcdefghijklmno";
+  // Assembled at runtime so the literal never matches GitHub's own secret
+  // scanner in source; the scanned diff line still carries the full token.
+  const token = ["xoxb", "1234567890", "abcdefghijklmno"].join("-");
   // Avoids key/secret/token/password so only the slack-token pattern fires.
   const patch = hunk("@@ -1,1 +1,1 @@", [`+SLACK_BOT_CRED=${token}`]);
   const diff = makeDiff([makeFile("src/slack.ts", patch)]);
