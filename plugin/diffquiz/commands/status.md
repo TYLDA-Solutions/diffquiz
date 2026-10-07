@@ -75,15 +75,30 @@ Invoked as `/diffquiz:status`. Read-only — never writes anything.
    '
    ```
 
-4. Report in a few lines: current mode, the config file path used, and
-   whether a fresh quiz marker exists for this repo (fresh means the next
-   push/PR in auto mode will not be intercepted).
+4. Check that the auto-mode hook can actually run. Claude Code launches
+   hooks with its own process environment — when the desktop app was started
+   from the Dock, that PATH has no Homebrew/nvm/volta — so probe the hook's
+   launcher under exactly that minimal PATH:
+
+   ```bash
+   env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin sh "${CLAUDE_PLUGIN_ROOT}/hooks/pre-push-quiz.sh" --probe
+   ```
+
+   It prints the Node binary the hook will use, or `node: NOT FOUND`. In the
+   NOT FOUND case auto mode cannot intercept anything; tell the user to
+   install Node in a standard location or set `DIFFQUIZ_NODE=/path/to/node`
+   in their environment.
+
+5. Report in a few lines: current mode, the config file path used, whether a
+   fresh quiz marker exists for this repo (fresh means the next push/PR in
+   auto mode will not be intercepted), and the hook runtime probe result.
 
 Example output:
 
 ```
 Mode: auto (config: ~/.config/diffquiz/config.json)
 Quiz marker for this repo: fresh — next push/PR won't be intercepted.
+Hook runtime: node /opt/homebrew/bin/node (v22.12.0) — auto mode can run.
 ```
 
 ```

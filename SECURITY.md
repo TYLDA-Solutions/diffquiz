@@ -101,6 +101,14 @@ choice, never the cloned repo's.
 **Scope:** the hook only runs inside Claude Code sessions. A `git push` from
 a plain terminal, another editor, or a CI job is never intercepted.
 
+**Launcher.** Claude Code runs hooks with its own process environment. The
+hook is therefore started via `hooks/pre-push-quiz.sh`, a POSIX `sh` script
+that locates a Node binary (PATH, common install paths, nvm, or an explicit
+`DIFFQUIZ_NODE`) and execs the hook. It never downloads anything and runs no
+code outside the plugin directory. If no Node is found while auto mode is
+on, it exits non-zero with a one-line explanation so Claude Code surfaces a
+hook-error notice — fail-open, but visible.
+
 ### Subprocess isolation
 
 The `claude` and `codex` subprocesses run with their working directory

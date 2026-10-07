@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-07
+
+### Fixed
+
+- Auto mode never fired from a Dock-launched Claude Code desktop app. Claude
+  Code runs plugin hooks with its own process environment, whose PATH is the
+  bare system default without Homebrew/nvm/volta, so the hook command `node …`
+  failed with exit 127 — which Claude Code treats as a non-blocking error, so
+  pushes proceeded silently. The hook is now started through a POSIX `sh`
+  launcher that locates a Node binary itself (PATH, then common install
+  locations, nvm, or `DIFFQUIZ_NODE`). If no Node is found while auto mode is
+  on, the launcher fails open *loudly* with a hook-error notice instead of
+  silently.
+- Pushes issued as `cd <repo> && git push` or `git -C <repo> push` from a
+  session started outside the repo are now resolved to that repo for the
+  quiz-marker check.
+- `/diffquiz:status` probes the hook runtime under the minimal GUI PATH and
+  reports the Node binary the hook will use.
+
 ## [0.2.0] - 2026-09-02
 
 ### Added
@@ -29,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The standalone CLI's own behavior is unaffected by modes — `mode` is a
   plugin-only concept the CLI already tolerates as an unknown config key.
 
+[0.2.1]: https://github.com/TYLDA-Solutions/diffquiz/releases/tag/v0.2.1
 [0.2.0]: https://github.com/TYLDA-Solutions/diffquiz/releases/tag/v0.2.0
 
 ## [0.1.0] - 2026-09-01

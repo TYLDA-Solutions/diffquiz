@@ -2,10 +2,10 @@
 /**
  * diffquiz auto-mode PreToolUse hook (Bash).
  *
- * Plain Node ESM, zero dependencies beyond `node:` builtins — this file is
- * invoked directly by the Claude Code plugin runtime via
- * `node "${CLAUDE_PLUGIN_ROOT}/hooks/pre-push-quiz.mjs"`, so it must start
- * fast and never assume anything about the environment beyond stdin/argv.
+ * Plain Node ESM, zero dependencies beyond `node:` builtins. Claude Code
+ * runs `sh pre-push-quiz.sh`, which locates a Node binary (GUI-launched
+ * apps don't have Homebrew/nvm on PATH) and execs this file, so it must
+ * start fast and never assume anything about the environment beyond stdin.
  *
  * What it does: when the session is about to run `git push` or
  * `gh pr create` AND the user has opted into `mode: "auto"` in their
@@ -21,9 +21,9 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 // Word-boundary intent match, tolerant of prefixes/suffixes on the same
 // shell command (e.g. `cd x && git push`, `git -C x push --force`) but not
@@ -63,7 +63,8 @@ async function run() {
 
   if (readMode() !== "auto") return allow();
 
-  const cwd = typeof input.cwd === "string" && input.cwd.length > 0 ? input.cwd : process.cwd();
+  const sessionCwd = typeof input.cwd === "string" && input.cwd.length > 0 ? input.cwd : process.cwd();
+  const cwd = resolveCommandCwd(command, sessionCwd);
 
   let root;
   let head;
@@ -86,6 +87,29 @@ async function run() {
   if (isMarkerFresh(root, head)) return allow();
 
   deny(DENY_REASON);
+}
+
+// ---------------------------------------------------------------------------
+// repo location
+// ---------------------------------------------------------------------------
+
+/**
+ * Sessions often start outside the repo (a docs folder, a monorepo root) and
+ * push with `cd <repo> && git push` or `git -C <repo> push` in one command.
+ * Claude Code's tracked cwd doesn't change for those, so the marker lookup
+ * would miss the repo. Best-effort: honor `git -C <path>` first, then a
+ * leading `cd <path> &&`. Anything else falls back to the session cwd.
+ */
+function resolveCommandCwd(command, sessionCwd) {
+  const dashC = /\bgit\s+-C\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(command);
+  const cd = /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*&&/.exec(command);
+  const match = dashC ?? cd;
+  if (!match) return sessionCwd;
+  const target = (match[1] ?? match[2] ?? match[3] ?? "").replace(/^~(?=\/|$)/, homedir());
+  const resolved = resolve(sessionCwd, target);
+  // A target that doesn't exist can't be the repo being pushed; keep the
+  // session cwd so a relative `cd x` inside the repo still finds it.
+  return existsSync(resolved) ? resolved : sessionCwd;
 }
 
 // ---------------------------------------------------------------------------
