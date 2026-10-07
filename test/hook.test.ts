@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -414,4 +414,111 @@ test("falls back to ~/.config/diffquiz/config.json and ~/.cache/diffquiz when on
   );
   const allowResult = runHook(bashInput("git push", repo), { home });
   assertAllow(allowResult);
+});
+
+// ---------------------------------------------------------------------------
+// sh launcher — Claude Code runs hooks with its own (often PATH-less) env
+// ---------------------------------------------------------------------------
+
+const LAUNCHER_PATH = join(import.meta.dirname, "..", "plugin", "diffquiz", "hooks", "pre-push-quiz.sh");
+
+interface LauncherEnv extends HookEnvOverrides {
+  path: string;
+  diffquizNode?: string;
+}
+
+function runLauncher(args: string[], stdinPayload: string, env: LauncherEnv): HookResult {
+  const childEnv: NodeJS.ProcessEnv = { PATH: env.path };
+  if (env.home !== undefined) childEnv.HOME = env.home;
+  if (env.diffquizConfig !== undefined) childEnv.DIFFQUIZ_CONFIG = env.diffquizConfig;
+  if (env.diffquizCacheDir !== undefined) childEnv.DIFFQUIZ_CACHE_DIR = env.diffquizCacheDir;
+  if (env.diffquizNode !== undefined) childEnv.DIFFQUIZ_NODE = env.diffquizNode;
+  const result = spawnSync("sh", [LAUNCHER_PATH, ...args], { input: stdinPayload, encoding: "utf8", env: childEnv, timeout: 5000 });
+  if (result.error) throw result.error;
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** A bin dir holding only a `node` symlink to the running runtime. */
+function makeNodeOnlyBin(): string {
+  const dir = mkdtempSync(join(tmpdir(), "diffquiz-hook-bin-"));
+  symlinkSync(process.execPath, join(dir, "node"));
+  return dir;
+}
+
+const GUI_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+test("launcher: finds node via DIFFQUIZ_NODE under a GUI-style PATH and reaches the hook (auto + no marker -> deny)", (t) => {
+  const home = makeIsolatedHome();
+  const repo = makeTempRepo();
+  t.after(() => { rmSync(home, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); });
+  const config = writeConfig(home, JSON.stringify({ mode: "auto" }));
+  const result = runLauncher([], bashInput("git push", repo), { path: GUI_PATH, home, diffquizConfig: config, diffquizCacheDir: cacheDirIn(home), diffquizNode: process.execPath });
+  assertDeny(result);
+});
+
+test("launcher: finds node on PATH when present (ondemand -> silent allow)", (t) => {
+  const home = makeIsolatedHome();
+  const bin = makeNodeOnlyBin();
+  t.after(() => { rmSync(home, { recursive: true, force: true }); rmSync(bin, { recursive: true, force: true }); });
+  const config = writeConfig(home, JSON.stringify({ mode: "ondemand" }));
+  const result = runLauncher([], bashInput("git push"), { path: `${bin}:${GUI_PATH}`, home, diffquizConfig: config });
+  assertAllow(result);
+  assert.equal(result.stderr, "");
+});
+
+test("launcher: no node + auto mode -> loud fail-open (exit 1, stderr notice, no JSON)", (t) => {
+  const home = makeIsolatedHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const config = writeConfig(home, JSON.stringify({ mode: "auto" }));
+  const result = runLauncher([], bashInput("git push"), { path: GUI_PATH, home, diffquizConfig: config, diffquizNode: "/nonexistent/node" });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /diffquiz auto mode skipped: no Node binary found/);
+});
+
+test("launcher: no node + ondemand -> silent allow (exit 0, nothing printed)", (t) => {
+  const home = makeIsolatedHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const config = writeConfig(home, JSON.stringify({ mode: "ondemand" }));
+  const result = runLauncher([], bashInput("git push"), { path: GUI_PATH, home, diffquizConfig: config, diffquizNode: "/nonexistent/node" });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+});
+
+test("launcher: --probe reports the node it would use, or NOT FOUND with exit 1", (t) => {
+  const home = makeIsolatedHome();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const found = runLauncher(["--probe"], "", { path: GUI_PATH, home, diffquizNode: process.execPath });
+  assert.equal(found.status, 0);
+  assert.match(found.stdout, new RegExp(`^node: ${process.execPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(v\\d+`));
+  const missing = runLauncher(["--probe"], "", { path: GUI_PATH, home, diffquizNode: "/nonexistent/node" });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stdout, /node: NOT FOUND/);
+});
+
+// ---------------------------------------------------------------------------
+// repo resolution from the command itself (cd <repo> && …, git -C <repo> …)
+// ---------------------------------------------------------------------------
+
+test("auto mode + `cd <repo> && git push` from a non-repo cwd -> resolves the repo and denies without a marker", (t) => {
+  const home = makeIsolatedHome();
+  const repo = makeTempRepo();
+  const outside = mkdtempSync(join(tmpdir(), "diffquiz-hook-outside-"));
+  t.after(() => { for (const d of [home, repo, outside]) rmSync(d, { recursive: true, force: true }); });
+  const config = writeConfig(home, JSON.stringify({ mode: "auto" }));
+  const result = runHook(bashInput(`cd ${repo} && git push -u origin main`, outside), { home, diffquizConfig: config, diffquizCacheDir: cacheDirIn(home) });
+  assertDeny(result);
+});
+
+test("auto mode + `git -C <repo> push` with a fresh marker for that repo -> allow", (t) => {
+  const home = makeIsolatedHome();
+  const repo = makeTempRepo();
+  const outside = mkdtempSync(join(tmpdir(), "diffquiz-hook-outside-"));
+  t.after(() => { for (const d of [home, repo, outside]) rmSync(d, { recursive: true, force: true }); });
+  const config = writeConfig(home, JSON.stringify({ mode: "auto" }));
+  const cacheDir = cacheDirIn(home);
+  writeMarker(cacheDir, markerHashFor(repo), { head: repoHead(repo), at: new Date().toISOString() });
+  const result = runHook(bashInput(`git -C "${repo}" push`, outside), { home, diffquizConfig: config, diffquizCacheDir: cacheDir });
+  assertAllow(result);
 });

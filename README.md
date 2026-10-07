@@ -174,6 +174,9 @@ defer a command, never block it — see
   Claude Code session until you've been quizzed on the current diff, then
   the command proceeds; wrong answers never block it. **A plain-terminal
   `git push` outside a Claude Code session is not intercepted.**
+  The hook is started through a small `sh` launcher that finds your Node
+  binary even when Claude Code was launched from the Dock (where PATH lacks
+  Homebrew/nvm); `/diffquiz:status` shows which Node it will use.
 
 Switch with `/diffquiz:auto`, `/diffquiz:ondemand`, `/diffquiz:status`. The
 mode lives only in your user-global config — a repo's `.diffquiz.json`

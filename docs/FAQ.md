@@ -100,3 +100,16 @@ can only come from your own user-global config file or the
 a `git clone` can touch. Every other repo-file setting (`provider:
 claude/codex/auto`, `model`, `questions`, `maxLines`, `secretScan`,
 `timeoutSeconds`, `language`) still works exactly as before.
+
+### Auto mode is on but my push wasn't intercepted — why?
+
+Run `/diffquiz:status`. It probes the hook under the same minimal PATH a
+Dock-launched Claude Code desktop app has. If it reports `node: NOT FOUND`,
+the hook can't run: install Node in a standard location (Homebrew, nvm,
+volta, fnm are all detected) or set `DIFFQUIZ_NODE=/path/to/node` in your
+environment, then restart Claude Code. Since 0.2.1 this case also shows up as
+a hook-error notice in the transcript instead of failing silently. Two other
+things to check: the session must have been started *after* the plugin was
+installed or updated (hooks load at session start), and a fresh quiz marker
+for the current `HEAD` (less than 60 minutes old) legitimately lets the push
+through.
